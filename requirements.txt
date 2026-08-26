@@ -16,5 +16,6 @@ sse_starlette
 uvicorn
 gunicorn
 fastapi
+python-multipart
 pandas
 openpyxl
