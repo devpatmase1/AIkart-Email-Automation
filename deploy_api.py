@@ -15,38 +15,61 @@ import socket
 
 load_dotenv()
 
-def connect_smtp_ipv4(host: str, port: int, timeout: float = 15.0):
+import ssl
+
+def connect_smtp_ipv4(host: str, port: int = 587, timeout: float = 15.0):
     """
-    Connects to an SMTP server forcing IPv4 address resolution to prevent 
-    'Errno 101 Network is unreachable' errors on cloud hosts like Render/AWS.
+    Connects to an SMTP server forcing IPv4 address resolution and SNI hostname 
+    to prevent 'Errno 101 Network is unreachable' and SSL Cert errors on cloud hosts like Render.
     """
     host = host.strip()
-    target_host = host
-    
-    try:
-        ipv4_addrs = [res[4][0] for res in socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)]
-        if ipv4_addrs:
-            target_host = ipv4_addrs[0]
-    except Exception as dns_err:
-        print(f"[SMTP IPv4 DNS] Warning: Could not resolve IPv4 for {host}: {dns_err}")
+
+    def create_v4_socket(address, timeout=timeout):
+        hostname, port_num = address
+        for res in socket.getaddrinfo(hostname, port_num, socket.AF_INET, socket.SOCK_STREAM):
+            af, socktype, proto, canonname, sa = res
+            sock = None
+            try:
+                sock = socket.socket(af, socktype, proto)
+                sock.settimeout(timeout)
+                sock.connect(sa)
+                return sock
+            except socket.error:
+                if sock is not None:
+                    sock.close()
+        raise socket.error(f"Could not connect to {hostname}:{port_num} via IPv4")
 
     try:
         if port == 465:
-            server = smtplib.SMTP_SSL(target_host, port, timeout=timeout)
-            server.server_hostname = host
+            sock = create_v4_socket((host, port), timeout=timeout)
+            context = ssl.create_default_context()
+            ssock = context.wrap_socket(sock, server_hostname=host)
+            server = smtplib.SMTP_SSL(timeout=timeout)
+            server.sock = ssock
+            server.file = ssock.makefile('rb')
+            server._host = host
+            server.getreply()
+            server.ehlo_or_helo_if_needed()
+            return server
         else:
-            server = smtplib.SMTP(target_host, port, timeout=timeout)
+            sock = create_v4_socket((host, port), timeout=timeout)
+            server = smtplib.SMTP(timeout=timeout)
+            server.sock = sock
+            server.file = sock.makefile('rb')
+            server._host = host
+            server.getreply()
+            server.ehlo_or_helo_if_needed()
+            context = ssl.create_default_context()
+            server.starttls(context=context)
+            return server
+    except Exception as primary_err:
+        # Fallback to standard SMTP if custom socket creation fails
+        if port == 465:
+            server = smtplib.SMTP_SSL(host, port, timeout=timeout)
+        else:
+            server = smtplib.SMTP(host, port, timeout=timeout)
             server.starttls()
         return server
-    except Exception as primary_err:
-        if target_host != host:
-            if port == 465:
-                server = smtplib.SMTP_SSL(host, port, timeout=timeout)
-            else:
-                server = smtplib.SMTP(host, port, timeout=timeout)
-                server.starttls()
-            return server
-        raise primary_err
 
 app = FastAPI(
     title="AI Email Broadcast & Multi-Sender Outreach Platform",
