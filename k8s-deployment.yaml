@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: email-automation-agent
+  labels:
+    app: email-automation-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: email-automation-agent
+  template:
+    metadata:
+      labels:
+        app: email-automation-agent
+    spec:
+      containers:
+      - name: email-agent
+        image: devaikart/langgraph-email-agent:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9000
+        envFrom:
+        - secretRef:
+            name: email-agent-secrets
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: email-automation-service
+spec:
+  type: LoadBalancer
+  selector:
+    app: email-automation-agent
+  ports:
+    - protocol: TCP
+      port: 9000
+      targetPort: 9000
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: email-agent-secrets
+type: Opaque
+stringData:
+  GOOGLE_API_KEY: "YOUR_GOOGLE_API_KEY_HERE"
+  GROQ_API_KEY: "YOUR_GROQ_API_KEY_HERE"
+  MY_EMAIL: "YOUR_EMAIL_HERE"
+  EMAIL_PASSWORD: "YOUR_APP_PASSWORD_HERE"

@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  email-automation-agent:
+    image: mrdevpatmase/langgraph-email-agent:latest
+    container_name: langgraph_email_agent
+    ports:
+      - "9000:9000"
+    env_file:
+      - .env
+    restart: always

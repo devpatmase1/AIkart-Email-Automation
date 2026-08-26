@@ -1,0 +1,66 @@
+apiVersion: aikart.dev/v1
+kind: AgentManifest
+metadata:
+  name: langgraph-email-automation
+  displayName: "Customer Support Email Automation Agent"
+  description: "AI-powered email automation workflow built with LangGraph, RAG, and multi-sender outreach."
+runtime:
+  type: docker
+  image: "mrdevpatmase/langgraph-email-agent:latest"
+resources:
+  cpu: 1
+  memoryMb: 1024
+  timeoutSeconds: 240
+inputs:
+  - name: prompt
+    label: "Customer Email Body / Automation Query"
+    type: textarea
+    required: true
+    description: "Enter the customer support query or email body to process and generate automated replies."
+  - name: mode
+    label: "Execution Mode"
+    type: select
+    required: false
+    default: "inbox-process"
+    description: "Select the email agent execution mode."
+    options:
+      - label: "Process Customer Email Query (Categorize & Draft Reply)"
+        value: "inbox-process"
+      - label: "Run RAG Product Enquiry Assistant"
+        value: "rag-query"
+      - label: "Verify Email Quality & Proofread"
+        value: "proofread"
+  - name: model
+    label: "LLM Provider / Model"
+    type: select
+    required: false
+    default: "gemini-2.0-flash"
+    description: "Target LLM for categorization and email drafting."
+    options:
+      - label: "Gemini 2.0 Flash"
+        value: "gemini-2.0-flash"
+      - label: "Llama 3.3 70B (Groq)"
+        value: "llama-3.3-70b-versatile"
+output:
+  format: markdown
+security:
+  networkEgress: allowlist
+  egressAllowlist:
+    - generativelanguage.googleapis.com
+    - googleapis.com
+    - api.groq.com
+    - smtp.gmail.com
+    - imap.gmail.com
+secrets:
+  - name: GOOGLE_API_KEY
+    description: "Google Gemini API Key for LLM reasoning and RAG vector search embeddings."
+    required: true
+  - name: GROQ_API_KEY
+    description: "Groq API Key (Optional, used if Groq model selected)."
+    required: false
+  - name: MY_EMAIL
+    description: "Sender Gmail Address for outreach and automated responses."
+    required: false
+  - name: EMAIL_PASSWORD
+    description: "Sender 16-character Google App Password."
+    required: false
