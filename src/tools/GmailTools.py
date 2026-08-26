@@ -1,4 +1,5 @@
 import os
+import socket
 import re
 import uuid
 import base64
@@ -380,8 +381,19 @@ class GmailToolsClass:
             msg["Subject"] = f"Re: {subject}" if not subject.startswith("Re: ") else subject
             msg.attach(MIMEText(reply_text, "plain"))
             
-            server = smtplib.SMTP(smtp_server, smtp_port)
-            server.starttls()
+            try:
+                addrs = [res[4][0] for res in socket.getaddrinfo(smtp_server, smtp_port, socket.AF_INET, socket.SOCK_STREAM)]
+                target_smtp = addrs[0] if addrs else smtp_server
+            except Exception:
+                target_smtp = smtp_server
+
+            if smtp_port == 465:
+                server = smtplib.SMTP_SSL(target_smtp, smtp_port, timeout=15)
+                server.server_hostname = smtp_server
+            else:
+                server = smtplib.SMTP(target_smtp, smtp_port, timeout=15)
+                server.starttls()
+
             server.login(email_user, email_pass)
             server.send_message(msg)
             server.quit()

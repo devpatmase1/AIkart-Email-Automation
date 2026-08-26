@@ -11,11 +11,42 @@ import os
 import io
 import re
 import pandas as pd
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import socket
 
 load_dotenv()
+
+def connect_smtp_ipv4(host: str, port: int, timeout: float = 15.0):
+    """
+    Connects to an SMTP server forcing IPv4 address resolution to prevent 
+    'Errno 101 Network is unreachable' errors on cloud hosts like Render/AWS.
+    """
+    host = host.strip()
+    target_host = host
+    
+    try:
+        ipv4_addrs = [res[4][0] for res in socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)]
+        if ipv4_addrs:
+            target_host = ipv4_addrs[0]
+    except Exception as dns_err:
+        print(f"[SMTP IPv4 DNS] Warning: Could not resolve IPv4 for {host}: {dns_err}")
+
+    try:
+        if port == 465:
+            server = smtplib.SMTP_SSL(target_host, port, timeout=timeout)
+            server.server_hostname = host
+        else:
+            server = smtplib.SMTP(target_host, port, timeout=timeout)
+            server.starttls()
+        return server
+    except Exception as primary_err:
+        if target_host != host:
+            if port == 465:
+                server = smtplib.SMTP_SSL(host, port, timeout=timeout)
+            else:
+                server = smtplib.SMTP(host, port, timeout=timeout)
+                server.starttls()
+            return server
+        raise primary_err
 
 app = FastAPI(
     title="AI Email Broadcast & Multi-Sender Outreach Platform",
@@ -107,8 +138,7 @@ async def send_bulk_dynamic(req: DynamicBulkEmailRequest):
     failed_count = 0
 
     try:
-        server = smtplib.SMTP(req.smtp_host, req.smtp_port)
-        server.starttls()
+        server = connect_smtp_ipv4(req.smtp_host, req.smtp_port)
         server.login(req.sender_email.strip(), req.sender_password.strip())
 
         for recipient in req.recipients:
