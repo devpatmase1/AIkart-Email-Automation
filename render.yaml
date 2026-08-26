@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: aikart-email-automation
+    env: python
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python deploy_api.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.11
