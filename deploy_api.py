@@ -31,7 +31,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-workflow = Workflow()
+workflow_instance = None
+
+def get_workflow():
+    global workflow_instance
+    if workflow_instance is None:
+        workflow_instance = Workflow()
+    return workflow_instance
 
 class DynamicBulkEmailRequest(BaseModel):
     sender_email: str = Field(..., example="your_email@gmail.com")
@@ -168,7 +174,8 @@ async def process_inbox_dynamic(req: DynamicInboxRequest):
             "retrieved_documents": "", "writer_messages": [], "sendable": False, "trials": 0
         }
 
-        final_state = workflow.app.invoke(initial_state, {'recursion_limit': 100})
+        wf = get_workflow()
+        final_state = wf.app.invoke(initial_state, {'recursion_limit': 100})
         total_time = round(time.time() - start_time, 2)
 
         return {

@@ -36,14 +36,19 @@ def with_retry(chain, max_retries=5):
 class Agents():
     def __init__(self):
         # Choose which LLMs to use for each agent (Groq or Gemini)
-        groq_key = os.getenv("GROQ_API_KEY", "")
-        if groq_key and groq_key != "your_groq_api_key_here":
-            llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0.1)
+        groq_key = os.getenv("GROQ_API_KEY", "").strip()
+        google_key = os.getenv("GOOGLE_API_KEY", "").strip() or os.getenv("GEMINI_API_KEY", "").strip()
+
+        if not google_key or "YOUR_GOOGLE_API_KEY" in google_key:
+            google_key = "dummy_key_for_startup"
+
+        if groq_key and groq_key not in ["your_groq_api_key_here", "YOUR_GROQ_API_KEY_HERE"]:
+            llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0.1, api_key=groq_key)
         else:
-            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1)
+            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1, api_key=google_key)
         
         # QA assistant chat
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", output_dimensionality=768)
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", output_dimensionality=768, google_api_key=google_key)
         vectorstore = Chroma(persist_directory="db", embedding_function=embeddings)
         retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
         self.vectorstore = vectorstore
