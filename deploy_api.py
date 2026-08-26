@@ -246,7 +246,7 @@ async def get_logo_icon():
 async def get_dashboard():
     default_email = os.getenv("MY_EMAIL", "")
     default_pass = os.getenv("EMAIL_PASSWORD", "")
-    html_content = f"""
+    html_content = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -906,7 +906,7 @@ The Agentia Team</textarea>
 </body>
 </html>
 """
-    return html_content
+    return html_content.replace("{default_email}", default_email).replace("{default_pass}", default_pass)
 
 def main():
     port = int(os.getenv("PORT", 9000))
