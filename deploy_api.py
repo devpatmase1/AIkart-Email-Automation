@@ -128,53 +128,47 @@ class DynamicInboxRequest(BaseModel):
 
 @app.post("/api/parse-excel")
 async def parse_excel_file(file: UploadFile = File(...)):
-    """Extracts email addresses and metadata from uploaded Excel (.xlsx/.xls) or CSV files."""
+    """Master Dual-Strategy Email Extraction Engine from Excel, CSV, or Text files."""
     try:
         contents = await file.read()
         filename = file.filename.lower()
-
-        df = None
-        if filename.endswith(".csv"):
-            try:
-                df = pd.read_csv(io.BytesIO(contents))
-            except Exception:
-                df = pd.read_csv(io.BytesIO(contents), header=None)
-        elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-            try:
-                df = pd.read_excel(io.BytesIO(contents))
-            except Exception:
-                df = pd.read_excel(io.BytesIO(contents), header=None)
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format. Please upload .xlsx, .xls, or .csv file.")
-
         email_regex = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-        
+
         extracted = []
         email_set = set()
 
-        for idx, row in df.iterrows():
-            row_vals = [str(val).strip() for val in row.values if pd.notna(val) and str(val).strip() != "" and str(val).lower() != "nan"]
-            row_str = " ".join(row_vals)
-            matches = re.findall(email_regex, row_str)
-            for email_addr in matches:
+        # Strategy 1: Read Pandas DataFrames (header=None and header=0)
+        dfs = []
+        try:
+            if filename.endswith(".csv"):
+                dfs.append(pd.read_csv(io.BytesIO(contents), header=None))
+                dfs.append(pd.read_csv(io.BytesIO(contents)))
+            elif filename.endswith(".xlsx") or filename.endswith(".xls"):
+                dfs.append(pd.read_excel(io.BytesIO(contents), header=None))
+                dfs.append(pd.read_excel(io.BytesIO(contents)))
+        except Exception as read_err:
+            print(f"[Pandas Parse Notice] {read_err}")
+
+        for df in dfs:
+            if df is None or df.empty:
+                continue
+
+            # Check column header values
+            header_vals = [str(c).strip() for c in df.columns if pd.notna(c) and str(c).strip() != ""]
+            header_str = " ".join(header_vals)
+            header_matches = re.findall(email_regex, header_str)
+            for email_addr in header_matches:
                 email_addr = email_addr.lower().strip()
                 if email_addr not in email_set:
                     email_set.add(email_addr)
-                    non_email_vals = [v for v in row_vals if not re.search(email_regex, v)]
-                    name = non_email_vals[0] if non_email_vals else f"Contact #{idx+1}"
                     extracted.append({
-                        "row": idx + 1,
+                        "row": len(extracted) + 1,
                         "email": email_addr,
-                        "name": name
+                        "name": f"Contact #{len(extracted)+1}"
                     })
 
-        # Fallback: Retry reading without headers if 0 emails found
-        if len(extracted) == 0:
-            if filename.endswith(".csv"):
-                df_raw = pd.read_csv(io.BytesIO(contents), header=None)
-            else:
-                df_raw = pd.read_excel(io.BytesIO(contents), header=None)
-            for idx, row in df_raw.iterrows():
+            # Check data rows
+            for idx, row in df.iterrows():
                 row_vals = [str(val).strip() for val in row.values if pd.notna(val) and str(val).strip() != "" and str(val).lower() != "nan"]
                 row_str = " ".join(row_vals)
                 matches = re.findall(email_regex, row_str)
@@ -182,11 +176,26 @@ async def parse_excel_file(file: UploadFile = File(...)):
                     email_addr = email_addr.lower().strip()
                     if email_addr not in email_set:
                         email_set.add(email_addr)
+                        non_email_vals = [v for v in row_vals if not re.search(email_regex, v)]
+                        name = non_email_vals[0] if non_email_vals else f"Contact #{len(extracted)+1}"
                         extracted.append({
-                            "row": idx + 1,
+                            "row": len(extracted) + 1,
                             "email": email_addr,
-                            "name": f"Contact #{idx+1}"
+                            "name": name
                         })
+
+        # Strategy 2: Master Raw Text/Byte Scanner Fallback
+        raw_text = contents.decode('utf-8', errors='ignore')
+        raw_matches = re.findall(email_regex, raw_text)
+        for email_addr in raw_matches:
+            email_addr = email_addr.lower().strip()
+            if email_addr not in email_set:
+                email_set.add(email_addr)
+                extracted.append({
+                    "row": len(extracted) + 1,
+                    "email": email_addr,
+                    "name": f"Contact #{len(extracted)+1}"
+                })
 
         return {
             "status": "success",
@@ -195,7 +204,7 @@ async def parse_excel_file(file: UploadFile = File(...)):
             "emails": extracted
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Excel Parsing Error: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"File Extraction Error: {str(e)}")
 
 def resolve_smtp_server_for_email(email_addr: str, custom_host: str = "smtp.gmail.com", custom_port: int = 587):
     domain = email_addr.split("@")[-1].lower().strip() if "@" in email_addr else ""
