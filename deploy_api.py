@@ -126,9 +126,11 @@ class DynamicInboxRequest(BaseModel):
     imap_host: str = Field(default="imap.gmail.com")
     smtp_host: str = Field(default="smtp.gmail.com")
 
+import zipfile
+
 @app.post("/api/parse-excel")
 async def parse_excel_file(file: UploadFile = File(...)):
-    """Master Dual-Strategy Email Extraction Engine from Excel, CSV, or Text files."""
+    """Triple-Layer Universal Email Extraction Engine (Zip XML + Pandas + Raw Bytes)."""
     try:
         contents = await file.read()
         filename = file.filename.lower()
@@ -137,27 +139,72 @@ async def parse_excel_file(file: UploadFile = File(...)):
         extracted = []
         email_set = set()
 
-        # Strategy 1: Read Pandas DataFrames (header=None and header=0)
-        dfs = []
+        # Layer 1: XLSX / XLS Zip Archive XML Scanner (Extracts from sharedStrings.xml & sheet*.xml)
         try:
+            if zipfile.is_zipfile(io.BytesIO(contents)):
+                z = zipfile.ZipFile(io.BytesIO(contents))
+                for name in z.namelist():
+                    if name.endswith(".xml") or "sharedStrings" in name or "sheet" in name:
+                        xml_bytes = z.read(name)
+                        xml_text = xml_bytes.decode('utf-8', errors='ignore')
+                        matches = re.findall(email_regex, xml_text)
+                        for email_addr in matches:
+                            email_addr = email_addr.lower().strip()
+                            if email_addr not in email_set:
+                                email_set.add(email_addr)
+                                extracted.append({
+                                    "row": len(extracted) + 1,
+                                    "email": email_addr,
+                                    "name": f"Contact #{len(extracted)+1}"
+                                })
+        except Exception as zip_err:
+            print(f"[Zip Scanner Notice] {zip_err}")
+
+        # Layer 2: Pandas DataFrames
+        try:
+            dfs = []
             if filename.endswith(".csv"):
                 dfs.append(pd.read_csv(io.BytesIO(contents), header=None))
                 dfs.append(pd.read_csv(io.BytesIO(contents)))
             elif filename.endswith(".xlsx") or filename.endswith(".xls"):
                 dfs.append(pd.read_excel(io.BytesIO(contents), header=None))
                 dfs.append(pd.read_excel(io.BytesIO(contents)))
-        except Exception as read_err:
-            print(f"[Pandas Parse Notice] {read_err}")
 
-        for df in dfs:
-            if df is None or df.empty:
-                continue
+            for df in dfs:
+                if df is None or df.empty:
+                    continue
+                header_vals = [str(c).strip() for c in df.columns if pd.notna(c) and str(c).strip() != ""]
+                header_str = " ".join(header_vals)
+                for email_addr in re.findall(email_regex, header_str):
+                    email_addr = email_addr.lower().strip()
+                    if email_addr not in email_set:
+                        email_set.add(email_addr)
+                        extracted.append({
+                            "row": len(extracted) + 1,
+                            "email": email_addr,
+                            "name": f"Contact #{len(extracted)+1}"
+                        })
+                for idx, row in df.iterrows():
+                    row_vals = [str(val).strip() for val in row.values if pd.notna(val) and str(val).strip() != "" and str(val).lower() != "nan"]
+                    row_str = " ".join(row_vals)
+                    for email_addr in re.findall(email_regex, row_str):
+                        email_addr = email_addr.lower().strip()
+                        if email_addr not in email_set:
+                            email_set.add(email_addr)
+                            non_email_vals = [v for v in row_vals if not re.search(email_regex, v)]
+                            name = non_email_vals[0] if non_email_vals else f"Contact #{len(extracted)+1}"
+                            extracted.append({
+                                "row": len(extracted) + 1,
+                                "email": email_addr,
+                                "name": name
+                            })
+        except Exception as pd_err:
+            print(f"[Pandas Scanner Notice] {pd_err}")
 
-            # Check column header values
-            header_vals = [str(c).strip() for c in df.columns if pd.notna(c) and str(c).strip() != ""]
-            header_str = " ".join(header_vals)
-            header_matches = re.findall(email_regex, header_str)
-            for email_addr in header_matches:
+        # Layer 3: Raw Text Scanner
+        try:
+            raw_text = contents.decode('utf-8', errors='ignore')
+            for email_addr in re.findall(email_regex, raw_text):
                 email_addr = email_addr.lower().strip()
                 if email_addr not in email_set:
                     email_set.add(email_addr)
@@ -166,36 +213,8 @@ async def parse_excel_file(file: UploadFile = File(...)):
                         "email": email_addr,
                         "name": f"Contact #{len(extracted)+1}"
                     })
-
-            # Check data rows
-            for idx, row in df.iterrows():
-                row_vals = [str(val).strip() for val in row.values if pd.notna(val) and str(val).strip() != "" and str(val).lower() != "nan"]
-                row_str = " ".join(row_vals)
-                matches = re.findall(email_regex, row_str)
-                for email_addr in matches:
-                    email_addr = email_addr.lower().strip()
-                    if email_addr not in email_set:
-                        email_set.add(email_addr)
-                        non_email_vals = [v for v in row_vals if not re.search(email_regex, v)]
-                        name = non_email_vals[0] if non_email_vals else f"Contact #{len(extracted)+1}"
-                        extracted.append({
-                            "row": len(extracted) + 1,
-                            "email": email_addr,
-                            "name": name
-                        })
-
-        # Strategy 2: Master Raw Text/Byte Scanner Fallback
-        raw_text = contents.decode('utf-8', errors='ignore')
-        raw_matches = re.findall(email_regex, raw_text)
-        for email_addr in raw_matches:
-            email_addr = email_addr.lower().strip()
-            if email_addr not in email_set:
-                email_set.add(email_addr)
-                extracted.append({
-                    "row": len(extracted) + 1,
-                    "email": email_addr,
-                    "name": f"Contact #{len(extracted)+1}"
-                })
+        except Exception:
+            pass
 
         return {
             "status": "success",
@@ -809,7 +828,7 @@ The Agentia Team</textarea>
         let extractedEmailsList = [];
         let pollInterval = null;
 
-        // Auto-load credentials from localStorage
+        // Auto-load credentials from localStorage and bind manual email input listeners
         window.addEventListener('DOMContentLoaded', () => {
             const savedEmail = localStorage.getItem('aikart_sender_email');
             const savedPass = localStorage.getItem('aikart_sender_pass');
@@ -822,6 +841,13 @@ The Agentia Team</textarea>
             document.getElementById('activeSenderPassword').addEventListener('input', (e) => {
                 localStorage.setItem('aikart_sender_pass', e.target.value.trim());
             });
+
+            const manualBox = document.getElementById('manualEmailInput');
+            if (manualBox) {
+                ['input', 'keyup', 'change', 'paste', 'blur'].forEach(evt => {
+                    manualBox.addEventListener(evt, () => setTimeout(parseManualEmails, 40));
+                });
+            }
         });
 
         function clearSenderFields() {
