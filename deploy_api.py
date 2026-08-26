@@ -133,10 +133,17 @@ async def parse_excel_file(file: UploadFile = File(...)):
         contents = await file.read()
         filename = file.filename.lower()
 
+        df = None
         if filename.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(contents))
+            try:
+                df = pd.read_csv(io.BytesIO(contents))
+            except Exception:
+                df = pd.read_csv(io.BytesIO(contents), header=None)
         elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-            df = pd.read_excel(io.BytesIO(contents))
+            try:
+                df = pd.read_excel(io.BytesIO(contents))
+            except Exception:
+                df = pd.read_excel(io.BytesIO(contents), header=None)
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format. Please upload .xlsx, .xls, or .csv file.")
 
@@ -146,18 +153,40 @@ async def parse_excel_file(file: UploadFile = File(...)):
         email_set = set()
 
         for idx, row in df.iterrows():
-            row_str = " ".join(row.astype(str).values)
+            row_vals = [str(val).strip() for val in row.values if pd.notna(val) and str(val).strip() != "" and str(val).lower() != "nan"]
+            row_str = " ".join(row_vals)
             matches = re.findall(email_regex, row_str)
             for email_addr in matches:
                 email_addr = email_addr.lower().strip()
                 if email_addr not in email_set:
                     email_set.add(email_addr)
-                    name = str(row.iloc[0]) if len(row) > 0 else "Valued Contact"
+                    non_email_vals = [v for v in row_vals if not re.search(email_regex, v)]
+                    name = non_email_vals[0] if non_email_vals else f"Contact #{idx+1}"
                     extracted.append({
                         "row": idx + 1,
                         "email": email_addr,
                         "name": name
                     })
+
+        # Fallback: Retry reading without headers if 0 emails found
+        if len(extracted) == 0:
+            if filename.endswith(".csv"):
+                df_raw = pd.read_csv(io.BytesIO(contents), header=None)
+            else:
+                df_raw = pd.read_excel(io.BytesIO(contents), header=None)
+            for idx, row in df_raw.iterrows():
+                row_vals = [str(val).strip() for val in row.values if pd.notna(val) and str(val).strip() != "" and str(val).lower() != "nan"]
+                row_str = " ".join(row_vals)
+                matches = re.findall(email_regex, row_str)
+                for email_addr in matches:
+                    email_addr = email_addr.lower().strip()
+                    if email_addr not in email_set:
+                        email_set.add(email_addr)
+                        extracted.append({
+                            "row": idx + 1,
+                            "email": email_addr,
+                            "name": f"Contact #{idx+1}"
+                        })
 
         return {
             "status": "success",
@@ -166,7 +195,7 @@ async def parse_excel_file(file: UploadFile = File(...)):
             "emails": extracted
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Excel Parsing Error: {str(e)}")
 
 def resolve_smtp_server_for_email(email_addr: str, custom_host: str = "smtp.gmail.com", custom_port: int = 587):
     domain = email_addr.split("@")[-1].lower().strip() if "@" in email_addr else ""
@@ -807,37 +836,64 @@ The Agentia Team</textarea>
             const fileInput = document.getElementById('excelFile');
             if (!fileInput.files.length) return;
 
+            const file = fileInput.files[0];
+            const btnText = document.getElementById('bulkBtnText');
+            const btn = document.getElementById('sendBulkBtn');
+            const previewSection = document.getElementById('previewSection');
+
+            btnText.innerText = `⏳ Parsing "${file.name}"...`;
+
             const formData = new FormData();
-            formData.append('file', fileInput.files[0]);
+            formData.append('file', file);
 
             try {
                 const res = await fetch('/api/parse-excel', {
                     method: 'POST',
                     body: formData
                 });
-                const data = await res.json();
-                if (res.ok) {
+                const rawText = await res.text();
+                let data = {};
+                try {
+                    data = JSON.parse(rawText);
+                } catch (e) {
+                    data = { detail: rawText };
+                }
+
+                if (res.ok && data.emails) {
                     extractedEmailsList = data.emails.map(e => e.email);
-                    document.getElementById('extractedCountLabel').innerText = `✅ Found ${data.total_emails} Recipient Email Addresses in ${data.filename}`;
+                    
+                    if (data.total_emails === 0) {
+                        alert(`⚠️ No valid email addresses found in "${file.name}". Please make sure the file contains email addresses.`);
+                        btn.disabled = true;
+                        btnText.innerText = "⚠️ No Emails Found in File";
+                        previewSection.style.display = 'none';
+                        return;
+                    }
+
+                    document.getElementById('extractedCountLabel').innerText = `✅ Found ${data.total_emails} Recipient Email Address(es) in "${data.filename}"`;
                     
                     const tbody = document.getElementById('emailTableBody');
-                    tbody.innerHTML = data.emails.map(e => `
+                    tbody.innerHTML = data.emails.map((e, idx) => `
                         <tr>
-                            <td>${e.row}</td>
+                            <td>${idx + 1}</td>
                             <td>${e.name}</td>
-                            <td style="color: var(--primary); font-weight: 600;">${e.email}</td>
+                            <td style="color: var(--primary); font-weight: 700;">${e.email}</td>
                         </tr>
                     `).join('');
 
-                    document.getElementById('previewSection').style.display = 'block';
-                    const btn = document.getElementById('sendBulkBtn');
+                    previewSection.style.display = 'block';
                     btn.disabled = false;
-                    document.getElementById('bulkBtnText').innerText = `🚀 Send Campaign to ${data.total_emails} Recipients`;
+                    btnText.innerText = `🚀 Send Campaign to ${data.total_emails} Recipients`;
                 } else {
-                    alert("Parsing Error: " + data.detail);
+                    const errorMsg = data.detail || rawText || "Unknown file parsing error";
+                    alert("Parsing Error:\n\n" + errorMsg);
+                    btn.disabled = true;
+                    btnText.innerText = "❌ File Parsing Failed";
                 }
             } catch (err) {
                 alert("Upload failed: " + err.message);
+                btn.disabled = true;
+                btnText.innerText = "❌ Upload Failed";
             }
         }
 
