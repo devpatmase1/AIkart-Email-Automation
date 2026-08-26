@@ -734,8 +734,12 @@ async def get_dashboard():
         <!-- TAB 1: EXCEL BULK CAMPAIGN -->
         <div class="glass-card" id="excelCard">
             <div class="form-group">
-                <label>1. Upload Excel or CSV File (.xlsx, .xls, .csv)</label>
-                <input type="file" id="excelFile" accept=".xlsx, .xls, .csv" onchange="uploadExcel()">
+                <label>1. Upload Excel / CSV File OR Paste Email Addresses Below</label>
+                <input type="file" id="excelFile" accept=".xlsx, .xls, .csv, .txt" onchange="uploadExcel()">
+                <div style="margin-top: 0.75rem;">
+                    <label style="font-size: 0.82rem; color: var(--text-muted);">Or Paste Email Addresses Manually (comma, space, or line separated):</label>
+                    <textarea id="manualEmailInput" placeholder="devpatmase1@gmail.com, devpatmase@aikart.co, aradhya.ceo@aikart.co" style="min-height: 75px; margin-top: 0.35rem; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;" oninput="parseManualEmails()"></textarea>
+                </div>
             </div>
 
             <div id="previewSection" style="display: none;">
@@ -841,6 +845,46 @@ The Agentia Team</textarea>
             }
         }
 
+        function parseManualEmails() {
+            const text = document.getElementById('manualEmailInput').value;
+            const email_regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+            const matches = text.match(email_regex) || [];
+
+            const email_set = new Set();
+            const emails = [];
+            matches.forEach((e) => {
+                const addr = e.toLowerCase().trim();
+                if (!email_set.has(addr)) {
+                    email_set.add(addr);
+                    emails.push({ row: emails.length + 1, name: `Contact #${emails.length + 1}`, email: addr });
+                }
+            });
+
+            if (emails.length > 0) {
+                extractedEmailsList = emails.map(e => e.email);
+                document.getElementById('extractedCountLabel').innerText = `✅ Loaded ${emails.length} Recipient Email Address(es)`;
+                const tbody = document.getElementById('emailTableBody');
+                tbody.innerHTML = emails.map((e, idx) => `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${e.name}</td>
+                        <td style="color: var(--primary); font-weight: 700;">${e.email}</td>
+                    </tr>
+                `).join('');
+
+                document.getElementById('previewSection').style.display = 'block';
+                const btn = document.getElementById('sendBulkBtn');
+                btn.disabled = false;
+                document.getElementById('bulkBtnText').innerText = `🚀 Send Campaign to ${emails.length} Recipients`;
+            } else if (!document.getElementById('excelFile').files.length) {
+                extractedEmailsList = [];
+                document.getElementById('previewSection').style.display = 'none';
+                const btn = document.getElementById('sendBulkBtn');
+                btn.disabled = true;
+                document.getElementById('bulkBtnText').innerText = `🚀 Upload File or Paste Emails`;
+            }
+        }
+
         async function uploadExcel() {
             const fileInput = document.getElementById('excelFile');
             if (!fileInput.files.length) return;
@@ -851,6 +895,17 @@ The Agentia Team</textarea>
             const previewSection = document.getElementById('previewSection');
 
             btnText.innerText = `⏳ Parsing "${file.name}"...`;
+
+            // Client-side Instant FileReader Fast-path for Text/CSV
+            if (file.name.endsWith('.csv') || file.name.endsWith('.txt')) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const text = e.target.result;
+                    document.getElementById('manualEmailInput').value = text;
+                    parseManualEmails();
+                };
+                reader.readAsText(file);
+            }
 
             const formData = new FormData();
             formData.append('file', file);
@@ -868,17 +923,9 @@ The Agentia Team</textarea>
                     data = { detail: rawText };
                 }
 
-                if (res.ok && data.emails) {
+                if (res.ok && data.emails && data.total_emails > 0) {
                     extractedEmailsList = data.emails.map(e => e.email);
                     
-                    if (data.total_emails === 0) {
-                        alert(`⚠️ No valid email addresses found in "${file.name}". Please make sure the file contains email addresses.`);
-                        btn.disabled = true;
-                        btnText.innerText = "⚠️ No Emails Found in File";
-                        previewSection.style.display = 'none';
-                        return;
-                    }
-
                     document.getElementById('extractedCountLabel').innerText = `✅ Found ${data.total_emails} Recipient Email Address(es) in "${data.filename}"`;
                     
                     const tbody = document.getElementById('emailTableBody');
@@ -890,19 +937,22 @@ The Agentia Team</textarea>
                         </tr>
                     `).join('');
 
+                    // Pre-fill manual input area for user convenience
+                    document.getElementById('manualEmailInput').value = extractedEmailsList.join(', ');
+
                     previewSection.style.display = 'block';
                     btn.disabled = false;
                     btnText.innerText = `🚀 Send Campaign to ${data.total_emails} Recipients`;
-                } else {
-                    const errorMsg = data.detail || rawText || "Unknown file parsing error";
-                    alert("Parsing Error:\n\n" + errorMsg);
+                } else if (!extractedEmailsList.length) {
+                    const errorMsg = data.detail || rawText || "No email addresses found in file";
+                    alert("Parsing Notice:\n\n" + errorMsg);
                     btn.disabled = true;
-                    btnText.innerText = "❌ File Parsing Failed";
+                    btnText.innerText = "❌ No Emails Found in File";
                 }
             } catch (err) {
-                alert("Upload failed: " + err.message);
-                btn.disabled = true;
-                btnText.innerText = "❌ Upload Failed";
+                if (!extractedEmailsList.length) {
+                    alert("Upload notice: " + err.message);
+                }
             }
         }
 
