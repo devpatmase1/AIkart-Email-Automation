@@ -244,7 +244,9 @@ async def get_logo_icon():
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
-    html_content = """
+    default_email = os.getenv("MY_EMAIL", "")
+    default_pass = os.getenv("EMAIL_PASSWORD", "")
+    html_content = f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -636,11 +638,11 @@ async def get_dashboard():
             <div class="sender-row">
                 <div class="sender-col">
                     <label>Sender Email Address</label>
-                    <input type="email" id="activeSenderEmail" value="" placeholder="your_email@domain.com" autocomplete="off">
+                    <input type="email" id="activeSenderEmail" value="{default_email}" placeholder="your_email@domain.com" autocomplete="off">
                 </div>
                 <div class="sender-col">
                     <label>Sender App Password / Pass</label>
-                    <input type="password" id="activeSenderPassword" value="" placeholder="16-character App Password" autocomplete="off">
+                    <input type="password" id="activeSenderPassword" value="{default_pass}" placeholder="16-character App Password" autocomplete="off">
                 </div>
             </div>
         </div>
@@ -724,9 +726,26 @@ The Agentia Team</textarea>
         let extractedEmailsList = [];
         let pollInterval = null;
 
+        // Auto-load credentials from localStorage
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedEmail = localStorage.getItem('aikart_sender_email');
+            const savedPass = localStorage.getItem('aikart_sender_pass');
+            if (savedEmail) document.getElementById('activeSenderEmail').value = savedEmail;
+            if (savedPass) document.getElementById('activeSenderPassword').value = savedPass;
+
+            document.getElementById('activeSenderEmail').addEventListener('input', (e) => {
+                localStorage.setItem('aikart_sender_email', e.target.value.trim());
+            });
+            document.getElementById('activeSenderPassword').addEventListener('input', (e) => {
+                localStorage.setItem('aikart_sender_pass', e.target.value.trim());
+            });
+        });
+
         function clearSenderFields() {
             document.getElementById('activeSenderEmail').value = '';
             document.getElementById('activeSenderPassword').value = '';
+            localStorage.removeItem('aikart_sender_email');
+            localStorage.removeItem('aikart_sender_pass');
         }
 
         function switchTab(tab) {
