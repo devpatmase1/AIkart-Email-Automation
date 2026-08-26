@@ -127,6 +127,19 @@ async def parse_excel_file(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def resolve_smtp_server_for_email(email_addr: str, custom_host: str = "smtp.gmail.com", custom_port: int = 587):
+    domain = email_addr.split("@")[-1].lower().strip() if "@" in email_addr else ""
+    if domain in ["gmail.com", "googlemail.com"]:
+        return "smtp.gmail.com", 587
+    elif domain in ["outlook.com", "hotmail.com", "live.com", "office365.com"]:
+        return "smtp.office365.com", 587
+    elif domain in ["yahoo.com", "ymail.com"]:
+        return "smtp.mail.yahoo.com", 587
+    else:
+        host = custom_host.strip() if custom_host else "smtp.gmail.com"
+        port = custom_port if custom_port else 587
+        return host, port
+
 @app.post("/api/send-bulk-dynamic")
 async def send_bulk_dynamic(req: DynamicBulkEmailRequest):
     """Sends bulk emails from ANY custom email address and App Password provided by the user in the UI."""
@@ -137,8 +150,10 @@ async def send_bulk_dynamic(req: DynamicBulkEmailRequest):
     sent_count = 0
     failed_count = 0
 
+    smtp_host, smtp_port = resolve_smtp_server_for_email(req.sender_email, req.smtp_host, req.smtp_port)
+
     try:
-        server = connect_smtp_ipv4(req.smtp_host, req.smtp_port)
+        server = connect_smtp_ipv4(smtp_host, smtp_port)
         server.login(req.sender_email.strip(), req.sender_password.strip())
 
         for recipient in req.recipients:
@@ -176,12 +191,13 @@ async def send_bulk_dynamic(req: DynamicBulkEmailRequest):
             detail=f"Google Authentication Error (535 Bad Credentials) for '{req.sender_email}'.\n\nTo fix this:\n1. Enable 2-Step Verification on '{req.sender_email}'.\n2. Generate a 16-character App Password at https://myaccount.google.com/apppasswords.\n3. Enter the 16-character App Password in the Password field instead of your main Google password."
         )
     except Exception as e:
-        if "535" in str(e) or "BadCredentials" in str(e) or "Username and Password not accepted" in str(e):
+        err_str = str(e)
+        if "535" in err_str or "BadCredentials" in err_str or "Username and Password not accepted" in err_str or "authentication failed" in err_str.lower():
             raise HTTPException(
                 status_code=400,
-                detail=f"Google Authentication Error (535 Bad Credentials) for '{req.sender_email}'.\n\nTo fix this:\n1. Enable 2-Step Verification on '{req.sender_email}'.\n2. Generate a 16-character App Password at https://myaccount.google.com/apppasswords.\n3. Enter the 16-character App Password in the Password field instead of your main Google password."
+                detail=f"Authentication Error for '{req.sender_email}'. Please make sure 2-Step Verification is enabled and you are using a 16-character App Password (https://myaccount.google.com/apppasswords).\n\nDetails: {err_str}"
             )
-        raise HTTPException(status_code=500, detail=f"SMTP Login/Connection Error for '{req.sender_email}': {str(e)}")
+        raise HTTPException(status_code=400, detail=f"SMTP Connection/Login Error for '{req.sender_email}': {err_str}")
 
 @app.post("/api/process-inbox-dynamic")
 async def process_inbox_dynamic(req: DynamicInboxRequest):
@@ -795,7 +811,12 @@ The Agentia Team</textarea>
                     body: JSON.stringify({ sender_email, sender_password, recipients: extractedEmailsList, subject, body })
                 });
 
-                const data = await res.json();
+                let data;
+                try {
+                    data = await res.json();
+                } catch (e) {
+                    data = { detail: "Server error occurred. Please verify App Password or account permissions." };
+                }
                 if (res.ok) {
                     logBox.innerText += `\n[COMPLETED] Successfully sent ${data.sent_count} / ${data.total_recipients} emails!\n\nDelivery Logs:\n`;
                     data.results.forEach(r => {
