@@ -19,29 +19,41 @@ import ssl
 
 def connect_smtp_ipv4(host: str, port: int = 587, timeout: float = 15.0):
     """
-    Connects to an SMTP server forcing IPv4 address resolution and SNI hostname 
-    to prevent 'Errno 101 Network is unreachable' and SSL Cert errors on cloud hosts like Render.
+    Multi-tier resilient SMTP connector forcing IPv4 address resolution 
+    to prevent 'Errno 101 Network is unreachable' on cloud hosts like Render/AWS.
     """
     host = host.strip()
 
-    def create_v4_socket(address, timeout=timeout):
-        hostname, port_num = address
-        for res in socket.getaddrinfo(hostname, port_num, socket.AF_INET, socket.SOCK_STREAM):
-            af, socktype, proto, canonname, sa = res
-            sock = None
-            try:
-                sock = socket.socket(af, socktype, proto)
-                sock.settimeout(timeout)
-                sock.connect(sa)
-                return sock
-            except socket.error:
-                if sock is not None:
-                    sock.close()
-        raise socket.error(f"Could not connect to {hostname}:{port_num} via IPv4")
-
+    # Tier 1: Try standard smtplib connection
     try:
         if port == 465:
-            sock = create_v4_socket((host, port), timeout=timeout)
+            server = smtplib.SMTP_SSL(host, port, timeout=timeout)
+        else:
+            server = smtplib.SMTP(host, port, timeout=timeout)
+            server.starttls()
+        return server
+    except Exception as e1:
+        print(f"[SMTP Tier 1 Standard] Connection notice for {host}:{port}: {e1}")
+
+    # Tier 2: Custom IPv4 socket resolution with SNI
+    try:
+        def create_v4_socket(address, timeout_sec=timeout):
+            hostname, port_num = address
+            for res in socket.getaddrinfo(hostname, port_num, socket.AF_INET, socket.SOCK_STREAM):
+                af, socktype, proto, canonname, sa = res
+                sock = None
+                try:
+                    sock = socket.socket(af, socktype, proto)
+                    sock.settimeout(timeout_sec)
+                    sock.connect(sa)
+                    return sock
+                except socket.error:
+                    if sock is not None:
+                        sock.close()
+            raise socket.error(f"Could not connect to {hostname}:{port_num} via IPv4")
+
+        if port == 465:
+            sock = create_v4_socket((host, port), timeout_sec=timeout)
             context = ssl.create_default_context()
             ssock = context.wrap_socket(sock, server_hostname=host)
             server = smtplib.SMTP_SSL(timeout=timeout)
@@ -52,7 +64,7 @@ def connect_smtp_ipv4(host: str, port: int = 587, timeout: float = 15.0):
             server.ehlo_or_helo_if_needed()
             return server
         else:
-            sock = create_v4_socket((host, port), timeout=timeout)
+            sock = create_v4_socket((host, port), timeout_sec=timeout)
             server = smtplib.SMTP(timeout=timeout)
             server.sock = sock
             server.file = sock.makefile('rb')
@@ -62,14 +74,20 @@ def connect_smtp_ipv4(host: str, port: int = 587, timeout: float = 15.0):
             context = ssl.create_default_context()
             server.starttls(context=context)
             return server
-    except Exception as primary_err:
-        # Fallback to standard SMTP if custom socket creation fails
-        if port == 465:
-            server = smtplib.SMTP_SSL(host, port, timeout=timeout)
+    except Exception as e2:
+        print(f"[SMTP Tier 2 Socket] Connection notice for {host}:{port}: {e2}")
+
+    # Tier 3: Alternate port fallback (465 SSL vs 587 STARTTLS)
+    alt_port = 465 if port != 465 else 587
+    try:
+        if alt_port == 465:
+            server = smtplib.SMTP_SSL(host, alt_port, timeout=timeout)
         else:
-            server = smtplib.SMTP(host, port, timeout=timeout)
+            server = smtplib.SMTP(host, alt_port, timeout=timeout)
             server.starttls()
         return server
+    except Exception as e3:
+        raise RuntimeError(f"Unable to connect to SMTP server '{host}' on port {port} or {alt_port}. Error details: {e3}")
 
 app = FastAPI(
     title="AI Email Broadcast & Multi-Sender Outreach Platform",
@@ -853,22 +871,29 @@ The Agentia Team</textarea>
                     body: JSON.stringify({ sender_email, sender_password, recipients: extractedEmailsList, subject, body })
                 });
 
-                let data;
+                const rawText = await res.text();
+                let data = {};
                 try {
-                    data = await res.json();
-                } catch (e) {
-                    data = { detail: "Server error occurred. Please verify App Password or account permissions." };
+                    data = JSON.parse(rawText);
+                } catch (jsonErr) {
+                    data = { detail: rawText || `HTTP ${res.status} ${res.statusText}` };
                 }
+
                 if (res.ok) {
                     logBox.innerText += `\n[COMPLETED] Successfully sent ${data.sent_count} / ${data.total_recipients} emails!\n\nDelivery Logs:\n`;
-                    data.results.forEach(r => {
-                        logBox.innerText += ` • ${r.email} ➔ ${r.status.toUpperCase()}\n`;
-                    });
+                    if (data.results) {
+                        data.results.forEach(r => {
+                            logBox.innerText += ` • ${r.email} ➔ ${r.status.toUpperCase()}\n`;
+                        });
+                    }
                     alert(`🎉 Campaign Complete! Sent ${data.sent_count} emails directly from ${sender_email}!`);
                 } else {
-                    alert("Sending Failed: " + data.detail);
+                    const errorMsg = data.detail || rawText || "Unknown server error";
+                    logBox.innerText += `\n❌ [ERROR] ${errorMsg}\n`;
+                    alert("Sending Failed:\n\n" + errorMsg);
                 }
             } catch (err) {
+                logBox.innerText += `\n❌ [FETCH ERROR] ${err.message}\n`;
                 alert("Failed to send campaign: " + err.message);
             } finally {
                 btn.disabled = false;
