@@ -5,8 +5,8 @@ metadata:
   displayName: "Customer Support Email Automation Agent"
   description: "AI-powered email automation workflow built with LangGraph, RAG, and multi-sender outreach."
 runtime:
-  type: docker
-  image: "mrdevpatmase/langgraph-email-agent:latest"
+  type: python
+  command: "python deploy_api.py"
 resources:
   cpu: 1
   memoryMb: 1024
