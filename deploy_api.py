@@ -12,10 +12,12 @@ import io
 import re
 import pandas as pd
 import socket
+import smtplib
+import ssl
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 load_dotenv()
-
-import ssl
 
 def connect_smtp_ipv4(host: str, port: int = 587, timeout: float = 15.0):
     """
