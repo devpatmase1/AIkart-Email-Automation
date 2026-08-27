@@ -971,7 +971,7 @@ The Agentia Team</textarea>
                     btnText.innerText = `🚀 Send Campaign to ${data.total_emails} Recipients`;
                 } else if (!extractedEmailsList.length) {
                     const errorMsg = data.detail || rawText || "No email addresses found in file";
-                    alert("Parsing Notice:\n\n" + errorMsg);
+                    alert("Parsing Notice:\\n\\n" + errorMsg);
                     btn.disabled = true;
                     btnText.innerText = "❌ No Emails Found in File";
                 }
@@ -983,7 +983,7 @@ The Agentia Team</textarea>
         }
 
         async function sendBulkCampaign() {
-            if (!extractedEmailsList.length) return alert("Please upload an Excel file first!");
+            if (!extractedEmailsList.length) return alert("Please upload an Excel file or paste email addresses first!");
 
             const sender_email = document.getElementById('activeSenderEmail').value;
             const sender_password = document.getElementById('activeSenderPassword').value;
@@ -1003,7 +1003,7 @@ The Agentia Team</textarea>
             btnText.innerText = "Broadcasting Emails...";
             spinner.style.display = "block";
             logBox.style.display = "block";
-            logBox.innerText = `[START] Sending campaign to ${extractedEmailsList.length} recipients directly from ${sender_email}...\n`;
+            logBox.innerText = `[START] Sending campaign to ${extractedEmailsList.length} recipients directly from ${sender_email}...\\n`;
 
             try {
                 const res = await fetch('/api/send-bulk-dynamic', {
@@ -1021,20 +1021,20 @@ The Agentia Team</textarea>
                 }
 
                 if (res.ok) {
-                    logBox.innerText += `\n[COMPLETED] Successfully sent ${data.sent_count} / ${data.total_recipients} emails!\n\nDelivery Logs:\n`;
+                    logBox.innerText += `\\n[COMPLETED] Successfully sent ${data.sent_count} / ${data.total_recipients} emails!\\n\\nDelivery Logs:\\n`;
                     if (data.results) {
                         data.results.forEach(r => {
-                            logBox.innerText += ` • ${r.email} ➔ ${r.status.toUpperCase()}\n`;
+                            logBox.innerText += ` • ${r.email} ➔ ${r.status.toUpperCase()}\\n`;
                         });
                     }
                     alert(`🎉 Campaign Complete! Sent ${data.sent_count} emails directly from ${sender_email}!`);
                 } else {
                     const errorMsg = data.detail || rawText || "Unknown server error";
-                    logBox.innerText += `\n❌ [ERROR] ${errorMsg}\n`;
-                    alert("Sending Failed:\n\n" + errorMsg);
+                    logBox.innerText += `\\n❌ [ERROR] ${errorMsg}\\n`;
+                    alert("Sending Failed:\\n\\n" + errorMsg);
                 }
             } catch (err) {
-                logBox.innerText += `\n❌ [FETCH ERROR] ${err.message}\n`;
+                logBox.innerText += `\\n❌ [FETCH ERROR] ${err.message}\\n`;
                 alert("Failed to send campaign: " + err.message);
             } finally {
                 btn.disabled = false;
