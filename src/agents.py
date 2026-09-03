@@ -45,7 +45,7 @@ class Agents():
         if groq_key and groq_key not in ["your_groq_api_key_here", "YOUR_GROQ_API_KEY_HERE"]:
             llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0.1, api_key=groq_key)
         else:
-            llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1, api_key=google_key)
+            llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0.1, api_key=google_key)
         
         # QA assistant chat
         embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", output_dimensionality=768, google_api_key=google_key)

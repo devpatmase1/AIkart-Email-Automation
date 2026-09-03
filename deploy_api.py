@@ -242,62 +242,170 @@ def resolve_smtp_server_for_email(email_addr: str, custom_host: str = "smtp.gmai
 
 @app.post("/api/send-bulk-dynamic")
 async def send_bulk_dynamic(req: DynamicBulkEmailRequest):
-    """Sends bulk emails from ANY custom email address and App Password provided by the user in the UI."""
-    if not req.sender_email or not req.sender_password:
-        raise HTTPException(status_code=400, detail="Sender Email Address and App Password are required!")
+    """Send bulk emails via AWS SES for aikart.co, otherwise use existing SMTP providers."""
+
+    if not req.sender_email:
+        raise HTTPException(status_code=400, detail="Sender Email Address is required!")
+
+    sender_email = req.sender_email.strip()
+    sender_domain = sender_email.split("@")[-1].lower()
 
     results = []
     sent_count = 0
     failed_count = 0
 
-    smtp_host, smtp_port = resolve_smtp_server_for_email(req.sender_email, req.smtp_host, req.smtp_port)
+    # =========================================================
+    # AWS SES MODE - aikart.co
+    # =========================================================
+    if sender_domain == "aikart.co":
+        ses_host = os.getenv(
+            "SES_SMTP_HOST",
+            "email-smtp.ap-south-1.amazonaws.com"
+        ).strip()
+
+        ses_port = int(os.getenv("SES_SMTP_PORT", "587"))
+
+        ses_username = os.getenv("SES_SMTP_USERNAME", "").strip()
+        ses_password = os.getenv("SES_SMTP_PASSWORD", "").strip()
+
+        if not ses_username or not ses_password:
+            raise HTTPException(
+                status_code=500,
+                detail="AWS SES SMTP credentials are missing in .env"
+            )
+
+        try:
+            print(f"[AWS SES] Sending from {sender_email}...")
+
+            server = connect_smtp_ipv4(ses_host, ses_port)
+            server.login(ses_username, ses_password)
+
+            for recipient in req.recipients:
+                try:
+                    recipient = recipient.strip()
+
+                    msg = MIMEMultipart()
+                    msg["From"] = sender_email
+                    msg["To"] = recipient
+                    msg["Subject"] = req.subject
+                    msg.attach(MIMEText(req.body, "plain"))
+
+                    server.send_message(msg)
+
+                    sent_count += 1
+                    results.append({
+                        "email": recipient,
+                        "status": "sent",
+                        "error": None
+                    })
+
+                    # Small delay for controlled sending
+                    time.sleep(0.5)
+
+                except Exception as mail_err:
+                    failed_count += 1
+                    results.append({
+                        "email": recipient,
+                        "status": "failed",
+                        "error": str(mail_err)
+                    })
+
+            server.quit()
+
+            return {
+                "status": "completed",
+                "provider": "Amazon SES SMTP",
+                "sender": sender_email,
+                "total_recipients": len(req.recipients),
+                "sent_count": sent_count,
+                "failed_count": failed_count,
+                "results": results
+            }
+
+        except smtplib.SMTPAuthenticationError:
+            raise HTTPException(
+                status_code=400,
+                detail="AWS SES SMTP authentication failed. Check SES SMTP username/password in .env."
+            )
+
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"AWS SES SMTP Error: {str(e)}"
+            )
+
+    # =========================================================
+    # EXISTING SMTP MODE - Gmail / Outlook / Yahoo / Custom
+    # =========================================================
+
+    if not req.sender_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Sender Password/App Password is required for non-SES senders!"
+        )
+
+    smtp_host, smtp_port = resolve_smtp_server_for_email(
+        sender_email,
+        req.smtp_host,
+        req.smtp_port
+    )
 
     try:
         server = connect_smtp_ipv4(smtp_host, smtp_port)
-        server.login(req.sender_email.strip(), req.sender_password.strip())
+        server.login(sender_email, req.sender_password.strip())
 
         for recipient in req.recipients:
             try:
+                recipient = recipient.strip()
+
                 msg = MIMEMultipart()
-                msg["From"] = req.sender_email.strip()
-                msg["To"] = recipient.strip()
+                msg["From"] = sender_email
+                msg["To"] = recipient
                 msg["Subject"] = req.subject
                 msg.attach(MIMEText(req.body, "plain"))
 
                 server.send_message(msg)
+
                 sent_count += 1
-                results.append({"email": recipient, "status": "sent", "error": None})
+                results.append({
+                    "email": recipient,
+                    "status": "sent",
+                    "error": None
+                })
+
                 time.sleep(0.3)
-            except smtplib.SMTPAuthenticationError as auth_err:
-                failed_count += 1
-                results.append({"email": recipient, "status": "failed", "error": f"Authentication failed: {str(auth_err)}"})
+
             except Exception as mail_err:
                 failed_count += 1
-                results.append({"email": recipient, "status": "failed", "error": str(mail_err)})
+                results.append({
+                    "email": recipient,
+                    "status": "failed",
+                    "error": str(mail_err)
+                })
 
         server.quit()
 
         return {
             "status": "completed",
-            "sender": req.sender_email,
+            "provider": "Direct SMTP",
+            "sender": sender_email,
             "total_recipients": len(req.recipients),
             "sent_count": sent_count,
             "failed_count": failed_count,
             "results": results
         }
-    except smtplib.SMTPAuthenticationError as auth_err:
+
+    except smtplib.SMTPAuthenticationError:
         raise HTTPException(
             status_code=400,
-            detail=f"Google Authentication Error (535 Bad Credentials) for '{req.sender_email}'.\n\nTo fix this:\n1. Enable 2-Step Verification on '{req.sender_email}'.\n2. Generate a 16-character App Password at https://myaccount.google.com/apppasswords.\n3. Enter the 16-character App Password in the Password field instead of your main Google password."
+            detail=f"SMTP authentication failed for '{sender_email}'."
         )
+
     except Exception as e:
-        err_str = str(e)
-        if "535" in err_str or "BadCredentials" in err_str or "Username and Password not accepted" in err_str or "authentication failed" in err_str.lower():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Authentication Error for '{req.sender_email}'. Please make sure 2-Step Verification is enabled and you are using a 16-character App Password (https://myaccount.google.com/apppasswords).\n\nDetails: {err_str}"
-            )
-        raise HTTPException(status_code=400, detail=f"SMTP Connection/Login Error for '{req.sender_email}': {err_str}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"SMTP Connection/Login Error: {str(e)}"
+        )
 
 @app.post("/api/process-inbox-dynamic")
 async def process_inbox_dynamic(req: DynamicInboxRequest):
@@ -307,8 +415,7 @@ async def process_inbox_dynamic(req: DynamicInboxRequest):
         os.environ["MY_EMAIL"] = req.sender_email.strip()
         os.environ["EMAIL_PASSWORD"] = req.sender_password.strip()
         os.environ["IMAP_SERVER"] = req.imap_host.strip()
-        os.environ["SMTP_SERVER"] = req.smtp_host.strip()
-
+        os.environ["SMTP_SERVER"] = req.smtp_host.st
         start_time = time.time()
         initial_state = {
             "emails": [],
