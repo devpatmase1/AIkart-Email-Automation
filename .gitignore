@@ -9,3 +9,9 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Local database and backup files
+db/chroma.sqlite3
+*_backup.py
+main_old.py
+deploy_api_before_ses.py

@@ -312,8 +312,12 @@ def run_http_campaign(job_id, sender_email, recipient_list, subject, body, attac
     job["finished_at"] = time.time()
 
 
-def run_smtp_campaign(job_id, sender_email, sender_pass, smtp_host, smtp_port, recipient_list, subject, body, attachment_payloads):
+def run_smtp_campaign(job_id, sender_email, login_user, login_pass, smtp_host, smtp_port, recipient_list, subject, body, attachment_payloads):
     """Background worker: sends the whole recipient list over one recycled SMTP connection.
+
+    `login_user`/`login_pass` authenticate the connection (e.g. Gmail App Password, or AWS SES
+    SMTP credentials) while `sender_email` is what shows up in the message's From header - these
+    differ for AWS SES, where the login is a generated SES SMTP user, not the From address.
 
     Runs off the request/response cycle so campaigns of 1000+ recipients don't block
     a single HTTP request (or the event loop) for the many minutes that takes.
@@ -322,14 +326,14 @@ def run_smtp_campaign(job_id, sender_email, sender_pass, smtp_host, smtp_port, r
 
     def open_connection():
         srv = connect_smtp_ipv4(smtp_host, smtp_port)
-        srv.login(sender_email.strip(), sender_pass)
+        srv.login(login_user, login_pass)
         return srv
 
     try:
         server = open_connection()
     except smtplib.SMTPAuthenticationError as auth_err:
         job["status"] = "failed"
-        job["error"] = f"Google Authentication Error (535 Bad Credentials) for '{sender_email}'. Verify your 16-character App Password."
+        job["error"] = f"SMTP Authentication Error for '{sender_email}' (login user: {login_user}). For Gmail, verify your 16-character App Password; for AWS SES, verify SES_SMTP_USERNAME/SES_SMTP_PASSWORD in .env."
         job["finished_at"] = time.time()
         return
     except Exception as e:
@@ -406,7 +410,7 @@ def run_smtp_campaign(job_id, sender_email, sender_pass, smtp_host, smtp_port, r
 async def send_bulk_dynamic(
     background_tasks: BackgroundTasks,
     sender_email: str = Form(...),
-    sender_password: str = Form(...),
+    sender_password: str = Form(""),
     smtp_host: str = Form("smtp.gmail.com"),
     smtp_port: int = Form(587),
     recipients: str = Form(...),
@@ -414,11 +418,14 @@ async def send_bulk_dynamic(
     body: str = Form(...),
     attachments: list[UploadFile] = File(default=[]),
 ):
-    """Starts a bulk email campaign (SMTP or Resend/Brevo HTTPS API, with optional attachments) as a
-    background job so it can handle 1000+ recipients without blocking the request. Returns a job_id;
-    poll /api/campaign-status/{job_id} for live progress."""
-    if not sender_email or not sender_password:
-        raise HTTPException(status_code=400, detail="Sender Email Address and Password/API Key are required!")
+    """Starts a bulk email campaign (AWS SES for aikart.co senders, or SMTP/Resend/Brevo HTTPS API
+    otherwise, with optional attachments) as a background job so it can handle 1000+ recipients
+    without blocking the request. Returns a job_id; poll /api/campaign-status/{job_id} for live progress."""
+    if not sender_email:
+        raise HTTPException(status_code=400, detail="Sender Email Address is required!")
+
+    sender_email = sender_email.strip()
+    sender_domain = sender_email.split("@")[-1].lower()
 
     recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
     if not recipient_list:
@@ -436,6 +443,55 @@ async def send_bulk_dynamic(
             "content_type": f.content_type or "application/octet-stream",
         })
 
+    def start_job(provider, dispatch):
+        job_id = uuid.uuid4().hex
+        campaign_jobs[job_id] = {
+            "status": "running",
+            "provider": provider,
+            "sender": sender_email,
+            "total": len(recipient_list),
+            "sent_count": 0,
+            "failed_count": 0,
+            "results": [],
+            "error": None,
+            "started_at": time.time(),
+            "finished_at": None,
+        }
+        dispatch(job_id)
+        return {
+            "status": "started",
+            "job_id": job_id,
+            "provider": provider,
+            "sender": sender_email,
+            "total_recipients": len(recipient_list),
+        }
+
+    # =========================================================
+    # AWS SES MODE - aikart.co
+    # =========================================================
+    if sender_domain == "aikart.co":
+        ses_host = os.getenv("SES_SMTP_HOST", "email-smtp.ap-south-1.amazonaws.com").strip()
+        ses_port = int(os.getenv("SES_SMTP_PORT", "587"))
+        ses_username = os.getenv("SES_SMTP_USERNAME", "").strip()
+        ses_password = os.getenv("SES_SMTP_PASSWORD", "").strip()
+
+        if not ses_username or not ses_password:
+            raise HTTPException(status_code=500, detail="AWS SES SMTP credentials are missing in .env (SES_SMTP_USERNAME / SES_SMTP_PASSWORD).")
+
+        print(f"[AWS SES Dispatch] Sending {len(recipient_list)} emails via {ses_host}:{ses_port} from {sender_email}...")
+        return start_job(
+            "Amazon SES SMTP",
+            lambda job_id: background_tasks.add_task(
+                run_smtp_campaign, job_id, sender_email, ses_username, ses_password, ses_host, ses_port, recipient_list, subject, body, attachment_payloads
+            ),
+        )
+
+    # =========================================================
+    # EXISTING SMTP MODE - Gmail / Outlook / Yahoo / Custom - or Resend/Brevo HTTPS API
+    # =========================================================
+    if not sender_password:
+        raise HTTPException(status_code=400, detail="Sender Password/App Password is required for non-SES senders!")
+
     sender_pass = sender_password.replace(" ", "").strip()
     resend_key = os.getenv("RESEND_API_KEY", "").strip()
     brevo_key = os.getenv("BREVO_API_KEY", "").strip()
@@ -445,46 +501,33 @@ async def send_bulk_dynamic(
     use_brevo = sender_pass.startswith("xkeysib-") or bool(brevo_key)
 
     if use_resend:
-        provider = "Resend HTTPS API (Cloud Resilient)"
-    elif use_brevo:
-        provider = "Brevo HTTPS API (Cloud Resilient)"
-    else:
-        provider = "Direct SMTP"
-
-    job_id = uuid.uuid4().hex
-    campaign_jobs[job_id] = {
-        "status": "running",
-        "provider": provider,
-        "sender": sender_email,
-        "total": len(recipient_list),
-        "sent_count": 0,
-        "failed_count": 0,
-        "results": [],
-        "error": None,
-        "started_at": time.time(),
-        "finished_at": None,
-    }
-
-    if use_resend:
         active_resend_key = sender_pass if sender_pass.startswith("re_") else resend_key
         print(f"[HTTPS Dispatch] Sending {len(recipient_list)} emails via Resend API from {sender_email}...")
-        background_tasks.add_task(run_http_campaign, job_id, sender_email, recipient_list, subject, body, attachment_payloads, send_via_resend_http, active_resend_key)
-    elif use_brevo:
+        return start_job(
+            "Resend HTTPS API (Cloud Resilient)",
+            lambda job_id: background_tasks.add_task(
+                run_http_campaign, job_id, sender_email, recipient_list, subject, body, attachment_payloads, send_via_resend_http, active_resend_key
+            ),
+        )
+
+    if use_brevo:
         active_brevo_key = sender_pass if sender_pass.startswith("xkeysib-") else brevo_key
         print(f"[HTTPS Dispatch] Sending {len(recipient_list)} emails via Brevo API from {sender_email}...")
-        background_tasks.add_task(run_http_campaign, job_id, sender_email, recipient_list, subject, body, attachment_payloads, send_via_brevo_http, active_brevo_key)
-    else:
-        resolved_smtp_host, resolved_smtp_port = resolve_smtp_server_for_email(sender_email, smtp_host, smtp_port)
-        print(f"[SMTP Dispatch] Sending {len(recipient_list)} emails via {resolved_smtp_host}:{resolved_smtp_port} from {sender_email}...")
-        background_tasks.add_task(run_smtp_campaign, job_id, sender_email, sender_pass, resolved_smtp_host, resolved_smtp_port, recipient_list, subject, body, attachment_payloads)
+        return start_job(
+            "Brevo HTTPS API (Cloud Resilient)",
+            lambda job_id: background_tasks.add_task(
+                run_http_campaign, job_id, sender_email, recipient_list, subject, body, attachment_payloads, send_via_brevo_http, active_brevo_key
+            ),
+        )
 
-    return {
-        "status": "started",
-        "job_id": job_id,
-        "provider": provider,
-        "sender": sender_email,
-        "total_recipients": len(recipient_list),
-    }
+    resolved_smtp_host, resolved_smtp_port = resolve_smtp_server_for_email(sender_email, smtp_host, smtp_port)
+    print(f"[SMTP Dispatch] Sending {len(recipient_list)} emails via {resolved_smtp_host}:{resolved_smtp_port} from {sender_email}...")
+    return start_job(
+        "Direct SMTP",
+        lambda job_id: background_tasks.add_task(
+            run_smtp_campaign, job_id, sender_email, sender_email, sender_pass, resolved_smtp_host, resolved_smtp_port, recipient_list, subject, body, attachment_payloads
+        ),
+    )
 
 
 @app.get("/api/campaign-status/{job_id}")
@@ -517,7 +560,6 @@ async def process_inbox_dynamic(req: DynamicInboxRequest):
         os.environ["EMAIL_PASSWORD"] = req.sender_password.strip()
         os.environ["IMAP_SERVER"] = req.imap_host.strip()
         os.environ["SMTP_SERVER"] = req.smtp_host.strip()
-
         start_time = time.time()
         initial_state = {
             "emails": [],

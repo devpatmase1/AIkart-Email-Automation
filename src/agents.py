@@ -206,7 +206,7 @@ class Agents():
                 self.vectorstore = vectorstore
             except Exception as e:
                 print(f"[Vectorstore Notice] Primary retriever setup: {e}")
-        
+
         self.retriever = SafeRetriever(
             primary_retriever=primary_retriever,
             fallback_retriever=LocalFallbackRetriever()
@@ -283,7 +283,7 @@ class Agents():
         )
         if llm is not None:
             try:
-                structured_proof = proofreader_prompt | llm.with_structured_output(ProofReaderOutput) 
+                structured_proof = proofreader_prompt | llm.with_structured_output(ProofReaderOutput)
                 self.email_proofreader = with_retry_and_fallback(structured_proof, fallback_proofreader)
             except Exception:
                 self.email_proofreader = RunnableLambda(
