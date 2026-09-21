@@ -467,7 +467,9 @@ async def send_bulk_dynamic(
         }
 
     # =========================================================
-    # AWS SES MODE - aikart.co
+    # AWS SES MODE - aikart.co, only when SES credentials are actually configured.
+    # Falls through to the regular Gmail/App-Password SMTP path below otherwise
+    # (e.g. on a local dev machine that doesn't have SES set up).
     # =========================================================
     if sender_domain == "aikart.co":
         ses_host = os.getenv("SES_SMTP_HOST", "email-smtp.ap-south-1.amazonaws.com").strip()
@@ -475,16 +477,15 @@ async def send_bulk_dynamic(
         ses_username = os.getenv("SES_SMTP_USERNAME", "").strip()
         ses_password = os.getenv("SES_SMTP_PASSWORD", "").strip()
 
-        if not ses_username or not ses_password:
-            raise HTTPException(status_code=500, detail="AWS SES SMTP credentials are missing in .env (SES_SMTP_USERNAME / SES_SMTP_PASSWORD).")
-
-        print(f"[AWS SES Dispatch] Sending {len(recipient_list)} emails via {ses_host}:{ses_port} from {sender_email}...")
-        return start_job(
-            "Amazon SES SMTP",
-            lambda job_id: background_tasks.add_task(
-                run_smtp_campaign, job_id, sender_email, ses_username, ses_password, ses_host, ses_port, recipient_list, subject, body, attachment_payloads
-            ),
-        )
+        if ses_username and ses_password:
+            print(f"[AWS SES Dispatch] Sending {len(recipient_list)} emails via {ses_host}:{ses_port} from {sender_email}...")
+            return start_job(
+                "Amazon SES SMTP",
+                lambda job_id: background_tasks.add_task(
+                    run_smtp_campaign, job_id, sender_email, ses_username, ses_password, ses_host, ses_port, recipient_list, subject, body, attachment_payloads
+                ),
+            )
+        print(f"[AWS SES Notice] SES_SMTP_USERNAME/SES_SMTP_PASSWORD not set - falling back to Gmail/App-Password SMTP for {sender_email}.")
 
     # =========================================================
     # EXISTING SMTP MODE - Gmail / Outlook / Yahoo / Custom - or Resend/Brevo HTTPS API
