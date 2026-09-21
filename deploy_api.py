@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -14,8 +14,18 @@ import pandas as pd
 import socket
 import smtplib
 import ssl
+import uuid
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+import base64
+
+# How many messages to send on one SMTP connection before recycling it - Gmail
+# silently drops long-lived connections around the ~100 message mark.
+SMTP_RECONNECT_EVERY = 80
+SMTP_SEND_DELAY = 0.3
+HTTP_SEND_DELAY = 0.1
 
 load_dotenv()
 
@@ -107,20 +117,16 @@ app.add_middleware(
 
 workflow_instance = None
 
+# In-memory store for background bulk-send campaigns: job_id -> progress dict.
+# Lets the frontend poll for live progress on campaigns of 1000+ recipients
+# instead of blocking on one giant HTTP request.
+campaign_jobs = {}
+
 def get_workflow():
     global workflow_instance
     if workflow_instance is None:
         workflow_instance = Workflow()
     return workflow_instance
-
-class DynamicBulkEmailRequest(BaseModel):
-    sender_email: str = Field(..., example="your_email@gmail.com")
-    sender_password: str = Field(..., example="abcd efgh ijkl mnop")
-    smtp_host: str = Field(default="smtp.gmail.com")
-    smtp_port: int = Field(default=587)
-    recipients: list[str]
-    subject: str
-    body: str
 
 class DynamicInboxRequest(BaseModel):
     sender_email: str = Field(..., example="your_email@gmail.com")
@@ -240,64 +246,267 @@ def resolve_smtp_server_for_email(email_addr: str, custom_host: str = "smtp.gmai
         port = custom_port if custom_port else 587
         return host, port
 
-@app.post("/api/send-bulk-dynamic")
-async def send_bulk_dynamic(req: DynamicBulkEmailRequest):
-    """Sends bulk emails from ANY custom email address and App Password provided by the user in the UI."""
-    if not req.sender_email or not req.sender_password:
-        raise HTTPException(status_code=400, detail="Sender Email Address and App Password are required!")
+import requests
 
-    results = []
-    sent_count = 0
-    failed_count = 0
+def send_via_resend_http(from_email: str, to_email: str, subject: str, body: str, api_key: str, attachments: list = None):
+    """Sends email via Resend HTTPS REST API (Port 443 - 100% works on Render)."""
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "from": from_email.strip(),
+        "to": [to_email.strip()],
+        "subject": subject,
+        "text": body,
+        "html": body.replace("\n", "<br>")
+    }
+    if attachments:
+        payload["attachments"] = [
+            {"filename": a["filename"], "content": base64.b64encode(a["content"]).decode("utf-8")}
+            for a in attachments
+        ]
+    resp = requests.post("https://api.resend.com/emails", json=payload, headers=headers, timeout=30)
+    if resp.status_code not in [200, 201]:
+        raise RuntimeError(f"Resend API Error ({resp.status_code}): {resp.text}")
+    return resp.json()
 
-    smtp_host, smtp_port = resolve_smtp_server_for_email(req.sender_email, req.smtp_host, req.smtp_port)
+def send_via_brevo_http(from_email: str, to_email: str, subject: str, body: str, api_key: str, attachments: list = None):
+    """Sends email via Brevo HTTPS REST API (Port 443 - 100% works on Render)."""
+    headers = {
+        "api-key": api_key.strip(),
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    payload = {
+        "sender": {"email": from_email.strip()},
+        "to": [{"email": to_email.strip()}],
+        "subject": subject,
+        "textContent": body,
+        "htmlContent": body.replace("\n", "<br>")
+    }
+    if attachments:
+        payload["attachment"] = [
+            {"name": a["filename"], "content": base64.b64encode(a["content"]).decode("utf-8")}
+            for a in attachments
+        ]
+    resp = requests.post("https://api.brevo.com/v3/smtp/email", json=payload, headers=headers, timeout=30)
+    if resp.status_code not in [200, 201]:
+        raise RuntimeError(f"Brevo API Error ({resp.status_code}): {resp.text}")
+    return resp.json()
+
+def run_http_campaign(job_id, sender_email, recipient_list, subject, body, attachment_payloads, send_fn, api_key):
+    """Background worker: dispatches the whole recipient list via a stateless HTTPS API (Resend/Brevo)."""
+    job = campaign_jobs[job_id]
+    for recipient in recipient_list:
+        try:
+            send_fn(sender_email, recipient, subject, body, api_key, attachment_payloads)
+            job["sent_count"] += 1
+            job["results"].append({"email": recipient, "status": "sent", "error": None})
+        except Exception as e:
+            job["failed_count"] += 1
+            job["results"].append({"email": recipient, "status": "failed", "error": str(e)})
+        time.sleep(HTTP_SEND_DELAY)
+
+    job["status"] = "completed"
+    job["finished_at"] = time.time()
+
+
+def run_smtp_campaign(job_id, sender_email, sender_pass, smtp_host, smtp_port, recipient_list, subject, body, attachment_payloads):
+    """Background worker: sends the whole recipient list over one recycled SMTP connection.
+
+    Runs off the request/response cycle so campaigns of 1000+ recipients don't block
+    a single HTTP request (or the event loop) for the many minutes that takes.
+    """
+    job = campaign_jobs[job_id]
+
+    def open_connection():
+        srv = connect_smtp_ipv4(smtp_host, smtp_port)
+        srv.login(sender_email.strip(), sender_pass)
+        return srv
 
     try:
-        server = connect_smtp_ipv4(smtp_host, smtp_port)
-        server.login(req.sender_email.strip(), req.sender_password.strip())
-
-        for recipient in req.recipients:
-            try:
-                msg = MIMEMultipart()
-                msg["From"] = req.sender_email.strip()
-                msg["To"] = recipient.strip()
-                msg["Subject"] = req.subject
-                msg.attach(MIMEText(req.body, "plain"))
-
-                server.send_message(msg)
-                sent_count += 1
-                results.append({"email": recipient, "status": "sent", "error": None})
-                time.sleep(0.3)
-            except smtplib.SMTPAuthenticationError as auth_err:
-                failed_count += 1
-                results.append({"email": recipient, "status": "failed", "error": f"Authentication failed: {str(auth_err)}"})
-            except Exception as mail_err:
-                failed_count += 1
-                results.append({"email": recipient, "status": "failed", "error": str(mail_err)})
-
-        server.quit()
-
-        return {
-            "status": "completed",
-            "sender": req.sender_email,
-            "total_recipients": len(req.recipients),
-            "sent_count": sent_count,
-            "failed_count": failed_count,
-            "results": results
-        }
+        server = open_connection()
     except smtplib.SMTPAuthenticationError as auth_err:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Google Authentication Error (535 Bad Credentials) for '{req.sender_email}'.\n\nTo fix this:\n1. Enable 2-Step Verification on '{req.sender_email}'.\n2. Generate a 16-character App Password at https://myaccount.google.com/apppasswords.\n3. Enter the 16-character App Password in the Password field instead of your main Google password."
-        )
+        job["status"] = "failed"
+        job["error"] = f"Google Authentication Error (535 Bad Credentials) for '{sender_email}'. Verify your 16-character App Password."
+        job["finished_at"] = time.time()
+        return
     except Exception as e:
-        err_str = str(e)
-        if "535" in err_str or "BadCredentials" in err_str or "Username and Password not accepted" in err_str or "authentication failed" in err_str.lower():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Authentication Error for '{req.sender_email}'. Please make sure 2-Step Verification is enabled and you are using a 16-character App Password (https://myaccount.google.com/apppasswords).\n\nDetails: {err_str}"
-            )
-        raise HTTPException(status_code=400, detail=f"SMTP Connection/Login Error for '{req.sender_email}': {err_str}")
+        job["status"] = "failed"
+        job["error"] = f"SMTP Connection Error for '{sender_email}': {e}"
+        job["finished_at"] = time.time()
+        return
+
+    total = len(recipient_list)
+    for idx, recipient in enumerate(recipient_list, start=1):
+        msg = MIMEMultipart()
+        msg["From"] = sender_email.strip()
+        msg["To"] = recipient.strip()
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+        for att in attachment_payloads:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(att["content"])
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", f'attachment; filename="{att["filename"]}"')
+            msg.attach(part)
+
+        try:
+            server.send_message(msg)
+            job["sent_count"] += 1
+            job["results"].append({"email": recipient, "status": "sent", "error": None})
+        except smtplib.SMTPAuthenticationError as auth_err:
+            job["failed_count"] += 1
+            job["results"].append({"email": recipient, "status": "failed", "error": f"Authentication failed: {auth_err}"})
+        except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, ConnectionResetError, ConnectionAbortedError, OSError) as conn_err:
+            # Gmail/other providers drop long-lived connections mid-campaign - reconnect and retry this one recipient.
+            try:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+                server = open_connection()
+                server.send_message(msg)
+                job["sent_count"] += 1
+                job["results"].append({"email": recipient, "status": "sent", "error": None})
+            except Exception as retry_err:
+                job["failed_count"] += 1
+                job["results"].append({"email": recipient, "status": "failed", "error": f"Connection dropped, reconnect failed: {retry_err}"})
+        except Exception as mail_err:
+            job["failed_count"] += 1
+            job["results"].append({"email": recipient, "status": "failed", "error": str(mail_err)})
+
+        # Proactively recycle the connection periodically - avoids providers' per-connection message caps.
+        if idx % SMTP_RECONNECT_EVERY == 0 and idx != total:
+            try:
+                server.quit()
+            except Exception:
+                pass
+            try:
+                server = open_connection()
+            except Exception as reconnect_err:
+                job["status"] = "failed"
+                job["error"] = f"Lost SMTP connection and could not reconnect after {idx}/{total} emails: {reconnect_err}"
+                job["finished_at"] = time.time()
+                return
+
+        time.sleep(SMTP_SEND_DELAY)
+
+    try:
+        server.quit()
+    except Exception:
+        pass
+
+    job["status"] = "completed"
+    job["finished_at"] = time.time()
+
+
+@app.post("/api/send-bulk-dynamic")
+async def send_bulk_dynamic(
+    background_tasks: BackgroundTasks,
+    sender_email: str = Form(...),
+    sender_password: str = Form(...),
+    smtp_host: str = Form("smtp.gmail.com"),
+    smtp_port: int = Form(587),
+    recipients: str = Form(...),
+    subject: str = Form(...),
+    body: str = Form(...),
+    attachments: list[UploadFile] = File(default=[]),
+):
+    """Starts a bulk email campaign (SMTP or Resend/Brevo HTTPS API, with optional attachments) as a
+    background job so it can handle 1000+ recipients without blocking the request. Returns a job_id;
+    poll /api/campaign-status/{job_id} for live progress."""
+    if not sender_email or not sender_password:
+        raise HTTPException(status_code=400, detail="Sender Email Address and Password/API Key are required!")
+
+    recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
+    if not recipient_list:
+        raise HTTPException(status_code=400, detail="At least one recipient email address is required!")
+
+    # Read all attached files into memory once, reused for every recipient
+    attachment_payloads = []
+    for f in attachments:
+        if not f.filename:
+            continue
+        content = await f.read()
+        attachment_payloads.append({
+            "filename": f.filename,
+            "content": content,
+            "content_type": f.content_type or "application/octet-stream",
+        })
+
+    sender_pass = sender_password.replace(" ", "").strip()
+    resend_key = os.getenv("RESEND_API_KEY", "").strip()
+    brevo_key = os.getenv("BREVO_API_KEY", "").strip()
+
+    # Detect if user entered Resend API key directly in password field
+    use_resend = sender_pass.startswith("re_") or bool(resend_key)
+    use_brevo = sender_pass.startswith("xkeysib-") or bool(brevo_key)
+
+    if use_resend:
+        provider = "Resend HTTPS API (Cloud Resilient)"
+    elif use_brevo:
+        provider = "Brevo HTTPS API (Cloud Resilient)"
+    else:
+        provider = "Direct SMTP"
+
+    job_id = uuid.uuid4().hex
+    campaign_jobs[job_id] = {
+        "status": "running",
+        "provider": provider,
+        "sender": sender_email,
+        "total": len(recipient_list),
+        "sent_count": 0,
+        "failed_count": 0,
+        "results": [],
+        "error": None,
+        "started_at": time.time(),
+        "finished_at": None,
+    }
+
+    if use_resend:
+        active_resend_key = sender_pass if sender_pass.startswith("re_") else resend_key
+        print(f"[HTTPS Dispatch] Sending {len(recipient_list)} emails via Resend API from {sender_email}...")
+        background_tasks.add_task(run_http_campaign, job_id, sender_email, recipient_list, subject, body, attachment_payloads, send_via_resend_http, active_resend_key)
+    elif use_brevo:
+        active_brevo_key = sender_pass if sender_pass.startswith("xkeysib-") else brevo_key
+        print(f"[HTTPS Dispatch] Sending {len(recipient_list)} emails via Brevo API from {sender_email}...")
+        background_tasks.add_task(run_http_campaign, job_id, sender_email, recipient_list, subject, body, attachment_payloads, send_via_brevo_http, active_brevo_key)
+    else:
+        resolved_smtp_host, resolved_smtp_port = resolve_smtp_server_for_email(sender_email, smtp_host, smtp_port)
+        print(f"[SMTP Dispatch] Sending {len(recipient_list)} emails via {resolved_smtp_host}:{resolved_smtp_port} from {sender_email}...")
+        background_tasks.add_task(run_smtp_campaign, job_id, sender_email, sender_pass, resolved_smtp_host, resolved_smtp_port, recipient_list, subject, body, attachment_payloads)
+
+    return {
+        "status": "started",
+        "job_id": job_id,
+        "provider": provider,
+        "sender": sender_email,
+        "total_recipients": len(recipient_list),
+    }
+
+
+@app.get("/api/campaign-status/{job_id}")
+async def get_campaign_status(job_id: str):
+    """Poll this for live progress (sent/failed counts, recent activity) on a running or finished campaign."""
+    job = campaign_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Campaign job not found. It may have been cleared after a server restart.")
+
+    response = {
+        "status": job["status"],
+        "provider": job["provider"],
+        "sender": job["sender"],
+        "total": job["total"],
+        "sent_count": job["sent_count"],
+        "failed_count": job["failed_count"],
+        "error": job["error"],
+        "recent_results": job["results"][-15:],
+    }
+    if job["status"] in ("completed", "failed"):
+        response["results"] = job["results"]
+    return response
 
 @app.post("/api/process-inbox-dynamic")
 async def process_inbox_dynamic(req: DynamicInboxRequest):
@@ -712,6 +921,22 @@ async def get_dashboard():
             box-shadow: inset 0 2px 10px rgba(0, 0, 0, 0.3);
         }
 
+        /* Bulk Campaign Progress Bar */
+        .progress-track {
+            width: 100%;
+            height: 10px;
+            background: #e2e8f0;
+            border-radius: 9999px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--primary-gradient);
+            border-radius: 9999px;
+            transition: width 0.4s ease;
+        }
+
         /* Custom Scrollbar */
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 4px; }
@@ -796,10 +1021,27 @@ Best regards,
 The Agentia Team</textarea>
             </div>
 
+            <div class="form-group">
+                <label>4. Attach Files / PDF (Optional)</label>
+                <div style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+                    <label for="campaignAttachments" class="btn-clear" style="background: rgba(37, 99, 235, 0.08); border-color: rgba(37, 99, 235, 0.25); color: var(--primary);">📎 Attach Files</label>
+                    <input type="file" id="campaignAttachments" multiple style="display: none;" onchange="handleAttachmentChange()">
+                    <span id="attachmentSummary" style="font-size: 0.82rem; color: var(--text-muted);">No files attached</span>
+                </div>
+                <div id="attachmentChips" style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem;"></div>
+            </div>
+
             <button class="btn-send" id="sendBulkBtn" onclick="sendBulkCampaign()" disabled>
                 <div class="spinner" id="bulkSpinner"></div>
                 <span id="bulkBtnText">🚀 Upload Excel File First</span>
             </button>
+
+            <div id="campaignProgressWrap" style="display: none;">
+                <div class="progress-track">
+                    <div class="progress-fill" id="campaignProgressFill" style="width: 0%;"></div>
+                </div>
+                <div id="campaignProgressLabel" style="font-size: 0.82rem; color: var(--text-muted); margin-top: 0.4rem;"></div>
+            </div>
 
             <div class="log-box" id="campaignLogBox"></div>
         </div>
@@ -829,6 +1071,7 @@ The Agentia Team</textarea>
     <script>
         let extractedEmailsList = [];
         let pollInterval = null;
+        let attachedFiles = [];
 
         // Auto-load credentials from localStorage and bind manual email input listeners
         window.addEventListener('DOMContentLoaded', () => {
@@ -984,6 +1227,38 @@ The Agentia Team</textarea>
             }
         }
 
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        function handleAttachmentChange() {
+            const input = document.getElementById('campaignAttachments');
+            attachedFiles = attachedFiles.concat(Array.from(input.files));
+            input.value = '';
+            renderAttachmentChips();
+        }
+
+        function removeAttachment(idx) {
+            attachedFiles.splice(idx, 1);
+            renderAttachmentChips();
+        }
+
+        function renderAttachmentChips() {
+            const summary = document.getElementById('attachmentSummary');
+            const container = document.getElementById('attachmentChips');
+            summary.innerText = attachedFiles.length ? `${attachedFiles.length} file(s) attached` : 'No files attached';
+            container.innerHTML = attachedFiles.map((f, idx) => `
+                <span style="display:inline-flex;align-items:center;gap:0.4rem;background:#eff6ff;border:1px solid #bfdbfe;color:var(--primary);padding:0.35rem 0.7rem;border-radius:9999px;font-size:0.8rem;font-weight:600;">
+                    📄 ${f.name} (${formatFileSize(f.size)})
+                    <span onclick="removeAttachment(${idx})" style="cursor:pointer;color:#e11d48;font-weight:800;">✕</span>
+                </span>
+            `).join('');
+        }
+
+        let campaignPollTimer = null;
+
         async function sendBulkCampaign() {
             if (!extractedEmailsList.length) return alert("Please upload an Excel file or paste email addresses first!");
 
@@ -1000,18 +1275,31 @@ The Agentia Team</textarea>
             const btnText = document.getElementById('bulkBtnText');
             const spinner = document.getElementById('bulkSpinner');
             const logBox = document.getElementById('campaignLogBox');
+            const progressWrap = document.getElementById('campaignProgressWrap');
+            const progressFill = document.getElementById('campaignProgressFill');
+            const progressLabel = document.getElementById('campaignProgressLabel');
 
             btn.disabled = true;
-            btnText.innerText = "Broadcasting Emails...";
+            btnText.innerText = "Starting Campaign...";
             spinner.style.display = "block";
             logBox.style.display = "block";
-            logBox.innerText = `[START] Sending campaign to ${extractedEmailsList.length} recipients directly from ${sender_email}...\\n`;
+            progressWrap.style.display = "block";
+            progressFill.style.width = "0%";
+            progressLabel.innerText = `Queuing ${extractedEmailsList.length} recipient(s)...`;
+            logBox.innerText = `[START] Sending campaign to ${extractedEmailsList.length} recipients directly from ${sender_email}` + (attachedFiles.length ? ` with ${attachedFiles.length} attachment(s)` : '') + `...\\n`;
 
             try {
+                const formData = new FormData();
+                formData.append('sender_email', sender_email);
+                formData.append('sender_password', sender_password);
+                formData.append('recipients', extractedEmailsList.join(','));
+                formData.append('subject', subject);
+                formData.append('body', body);
+                attachedFiles.forEach(f => formData.append('attachments', f));
+
                 const res = await fetch('/api/send-bulk-dynamic', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sender_email, sender_password, recipients: extractedEmailsList, subject, body })
+                    body: formData
                 });
 
                 const rawText = await res.text();
@@ -1022,27 +1310,79 @@ The Agentia Team</textarea>
                     data = { detail: rawText || `HTTP ${res.status} ${res.statusText}` };
                 }
 
-                if (res.ok) {
-                    logBox.innerText += `\\n[COMPLETED] Successfully sent ${data.sent_count} / ${data.total_recipients} emails!\\n\\nDelivery Logs:\\n`;
-                    if (data.results) {
-                        data.results.forEach(r => {
-                            logBox.innerText += ` • ${r.email} ➔ ${r.status.toUpperCase()}\\n`;
-                        });
-                    }
-                    alert(`🎉 Campaign Complete! Sent ${data.sent_count} emails directly from ${sender_email}!`);
+                if (res.ok && data.job_id) {
+                    logBox.innerText += `\\n[QUEUED] Job started via ${data.provider}. Sending in the background — this page will update live as each email goes out...\\n`;
+                    pollCampaignStatus(data.job_id, data.total_recipients, sender_email);
                 } else {
                     const errorMsg = data.detail || rawText || "Unknown server error";
                     logBox.innerText += `\\n❌ [ERROR] ${errorMsg}\\n`;
                     alert("Sending Failed:\\n\\n" + errorMsg);
+                    resetBulkSendUI();
                 }
             } catch (err) {
                 logBox.innerText += `\\n❌ [FETCH ERROR] ${err.message}\\n`;
                 alert("Failed to send campaign: " + err.message);
-            } finally {
-                btn.disabled = false;
-                btnText.innerText = `🚀 Send Campaign to ${extractedEmailsList.length} Recipients`;
-                spinner.style.display = "none";
+                resetBulkSendUI();
             }
+        }
+
+        function resetBulkSendUI() {
+            const btn = document.getElementById('sendBulkBtn');
+            const btnText = document.getElementById('bulkBtnText');
+            const spinner = document.getElementById('bulkSpinner');
+            btn.disabled = false;
+            btnText.innerText = `🚀 Send Campaign to ${extractedEmailsList.length} Recipients`;
+            spinner.style.display = "none";
+        }
+
+        function pollCampaignStatus(jobId, total, senderEmail) {
+            const btnText = document.getElementById('bulkBtnText');
+            const logBox = document.getElementById('campaignLogBox');
+            const progressFill = document.getElementById('campaignProgressFill');
+            const progressLabel = document.getElementById('campaignProgressLabel');
+
+            if (campaignPollTimer) clearInterval(campaignPollTimer);
+
+            campaignPollTimer = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/campaign-status/${jobId}`);
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.detail || "Could not fetch campaign status");
+
+                    const done = data.sent_count + data.failed_count;
+                    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+                    progressFill.style.width = pct + "%";
+                    progressLabel.innerText = `${done} / ${total} processed — ✅ ${data.sent_count} sent, ❌ ${data.failed_count} failed`;
+                    btnText.innerText = `Sending... ${done} / ${total}`;
+
+                    if (data.status === 'completed') {
+                        clearInterval(campaignPollTimer);
+                        logBox.innerText += `\\n[COMPLETED] Successfully sent ${data.sent_count} / ${data.total} emails!\\n\\nDelivery Logs:\\n`;
+                        (data.results || []).forEach(r => {
+                            logBox.innerText += ` • ${r.email} ➔ ${r.status.toUpperCase()}${r.error ? ' (' + r.error + ')' : ''}\\n`;
+                        });
+                        logBox.scrollTop = logBox.scrollHeight;
+                        alert(`🎉 Campaign Complete! Sent ${data.sent_count} / ${data.total} emails from ${senderEmail}!`);
+                        attachedFiles = [];
+                        renderAttachmentChips();
+                        resetBulkSendUI();
+                    } else if (data.status === 'failed') {
+                        clearInterval(campaignPollTimer);
+                        logBox.innerText += `\\n❌ [ERROR] ${data.error || 'Campaign failed'}\\n`;
+                        alert("Sending Failed:\\n\\n" + (data.error || 'Campaign failed'));
+                        resetBulkSendUI();
+                    } else {
+                        // Still running — append only the latest activity to the log
+                        logBox.innerText = `[RUNNING] ${done} / ${total} processed (✅ ${data.sent_count} sent, ❌ ${data.failed_count} failed)\\n\\nRecent activity:\\n` +
+                            data.recent_results.map(r => ` • ${r.email} ➔ ${r.status.toUpperCase()}`).join('\\n');
+                        logBox.scrollTop = logBox.scrollHeight;
+                    }
+                } catch (err) {
+                    clearInterval(campaignPollTimer);
+                    logBox.innerText += `\\n❌ [POLL ERROR] ${err.message}\\n`;
+                    resetBulkSendUI();
+                }
+            }, 1200);
         }
 
         async function processInbox() {
@@ -1093,6 +1433,7 @@ The Agentia Team</textarea>
                 if (pollInterval) clearInterval(pollInterval);
             }
         }
+
     </script>
 </body>
 </html>

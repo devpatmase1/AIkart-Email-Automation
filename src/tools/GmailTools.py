@@ -126,7 +126,10 @@ class GmailToolsClass:
 
     def create_draft_reply(self, initial_email, reply_text):
         if not self.service:
-            print(f"\n[SIMULATED GMAIL DRAFT CREATED]\nTo: {initial_email.sender}\nSubject: Re: {initial_email.subject}\n\nBody:\n{reply_text}\n")
+            safe_text = str(reply_text).encode("ascii", errors="replace").decode("ascii")
+            safe_subject = str(initial_email.subject).encode("ascii", errors="replace").decode("ascii")
+            safe_sender = str(initial_email.sender).encode("ascii", errors="replace").decode("ascii")
+            print(f"\n[SIMULATED GMAIL DRAFT CREATED]\nTo: {safe_sender}\nSubject: Re: {safe_subject}\n\nBody:\n{safe_text}\n")
             return {"id": "sim_draft_id"}
         try:
             # Create the reply message
@@ -147,7 +150,10 @@ class GmailToolsClass:
             return {"id": "smtp_sent_id"}
 
         if not self.service:
-            print(f"\n[SIMULATED GMAIL EMAIL SENT]\nTo: {initial_email.sender}\nSubject: Re: {initial_email.subject}\n\nBody:\n{reply_text}\n")
+            safe_text = str(reply_text).encode("ascii", errors="replace").decode("ascii")
+            safe_subject = str(initial_email.subject).encode("ascii", errors="replace").decode("ascii")
+            safe_sender = str(initial_email.sender).encode("ascii", errors="replace").decode("ascii")
+            print(f"\n[SIMULATED GMAIL EMAIL SENT]\nTo: {safe_sender}\nSubject: Re: {safe_subject}\n\nBody:\n{safe_text}\n")
             return {"id": "sim_sent_id"}
         try:
             # Create the reply message
@@ -314,7 +320,7 @@ class GmailToolsClass:
 
     def _fetch_via_imap(self):
         email_user = os.getenv("MY_EMAIL", "")
-        email_pass = os.getenv("EMAIL_PASSWORD", "") or os.getenv("SMTP_PASSWORD", "")
+        email_pass = (os.getenv("EMAIL_PASSWORD", "") or os.getenv("SMTP_PASSWORD", "")).replace(" ", "").strip()
         if not email_user or not email_pass or email_pass == "your_app_password_here":
             return None
         
@@ -367,7 +373,7 @@ class GmailToolsClass:
 
     def _send_via_smtp(self, recipient, subject, reply_text):
         email_user = os.getenv("MY_EMAIL", "")
-        email_pass = os.getenv("EMAIL_PASSWORD", "") or os.getenv("SMTP_PASSWORD", "")
+        email_pass = (os.getenv("EMAIL_PASSWORD", "") or os.getenv("SMTP_PASSWORD", "")).replace(" ", "").strip()
         if not email_user or not email_pass or email_pass == "your_app_password_here":
             return False
             
