@@ -74,8 +74,8 @@ This is the detailed flow of the system:
 1. **Clone the repository:**
 
    ```sh
-   git clone https://github.com/kaymen99/langgraph-email-automation.git
-   cd langgraph-email-automation
+   git clone https://github.com/devpatmase1/AIkart-Email-Automation.git
+   cd AIkart-Email-Automation
    ```
 
 2. **Create and activate a virtual environment:**
@@ -93,13 +93,13 @@ This is the detailed flow of the system:
 
 4. **Set up environment variables:**
 
-   Create a `.env` file in the root directory of the project and add your GMAIL address, we are using the Groq llama-3.1-70b model and the Google gemini embedding model so you must also get API keys to access them:
+   Copy `.env.example` to `.env` and fill in your own values:
 
-   ```env
-   MY_EMAIL=your_email@gmail.com
-   GROQ_API_KEY=your_groq_api_key
-   GOOGLE_API_KEY=your_gemini_api_key
+   ```sh
+   cp .env.example .env
    ```
+
+   At minimum you need `MY_EMAIL`, `EMAIL_PASSWORD` (a Gmail App Password, not your normal password), and one LLM key (`GROQ_API_KEY` or `GOOGLE_API_KEY`). The other variables in `.env.example` (Resend/Brevo/AWS SES) are optional and only needed if you're deploying somewhere that blocks direct SMTP.
 
 5. **Ensure Gmail API is enabled:**
 
@@ -107,21 +107,19 @@ This is the detailed flow of the system:
 
 ### Running the Application
 
-1. **Start the workflow:**
-
-   ```sh
-   python main.py
-   ```
-
-   The application will start checking for new emails, categorizing them, synthesizing queries, drafting responses, and verifying email quality.
-
-2. **Deploy as API:** you can deploy the workflow as an API using Langserve and FastAPI by running the command below:
+1. **Start the dashboard (recommended):**
 
    ```sh
    python deploy_api.py
    ```
 
-   The workflow api will be running on `localhost:8000`, you can consult the API docs on `/docs` and you can use the langsergve playground (on the route `/playground`) to test it out.
+   This serves the full web dashboard at `http://localhost:9000` — bulk Excel/CSV campaigns, live inbox monitoring, and file attachments all run from there. API docs are available at `/docs`.
+
+2. **Or run the CLI workflow directly** (processes whatever's currently in the configured inbox, no dashboard):
+
+   ```sh
+   python main.py
+   ```
 
 
 ### Customization

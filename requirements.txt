@@ -19,3 +19,4 @@ fastapi
 python-multipart
 pandas
 openpyxl
+requests
