@@ -1,48 +1,64 @@
 apiVersion: aikart.dev/v1
 kind: AgentManifest
+
 metadata:
-  name: langgraph-email-automation
-  displayName: "Customer Support Email Automation Agent"
-  description: "AI-powered email automation workflow built with LangGraph, RAG, and multi-sender outreach."
+  name: aikart-emailautomation
+  displayName: "LangGraph Customer Support Email Automation Agent"
+  description: "AI-powered customer support agent built with LangGraph and RAG that categorizes emails, performs knowledge lookup, and drafts professional replies."
+
 runtime:
-  type: python
-  command: "python deploy_api.py"
+  type: docker
+  image: "devaikart/aikart-emailautomation:1.0.0"
+  command: ["python", "aikart_runner.py"]
+
 resources:
-  cpu: 1
-  memoryMb: 1024
-  timeoutSeconds: 240
+  cpu: 0.25
+  memoryMb: 512
+  timeoutSeconds: 120
+
 inputs:
   - name: prompt
-    label: "Customer Email Body / Automation Query"
+    label: "Customer Email Body / Support Query"
     type: textarea
     required: true
-    description: "Enter the customer support query or email body to process and generate automated replies."
   - name: mode
     label: "Execution Mode"
     type: select
     required: false
     default: "inbox-process"
-    description: "Select the email agent execution mode."
     options:
-      - label: "Process Customer Email Query (Categorize & Draft Reply)"
-        value: "inbox-process"
-      - label: "Run RAG Product Enquiry Assistant"
-        value: "rag-query"
-      - label: "Verify Email Quality & Proofread"
-        value: "proofread"
+      - "inbox-process"
+      - "rag-query"
+      - "proofread"
   - name: model
-    label: "LLM Provider / Model"
+    label: "LLM Model Provider"
     type: select
     required: false
     default: "gemini-2.0-flash"
-    description: "Target LLM for categorization and email drafting."
     options:
-      - label: "Gemini 2.0 Flash"
-        value: "gemini-2.0-flash"
-      - label: "Llama 3.3 70B (Groq)"
-        value: "llama-3.3-70b-versatile"
+      - "gemini-2.0-flash"
+      - "llama-3.3-70b-versatile"
+
+secrets:
+  - name: GOOGLE_API_KEY
+    description: "Google Gemini API Key for LLM reasoning and RAG vector search embeddings."
+    required: true
+  - name: GROQ_API_KEY
+    description: "Groq API Key (Optional, used if Groq/Llama model is selected)."
+    required: false
+  - name: RESEND_API_KEY
+    description: "Resend API Key (starts with re_) for Cloud email dispatch."
+    required: false
+  - name: MY_EMAIL
+    description: "Sender Email Address for email responses."
+    required: false
+  - name: EMAIL_PASSWORD
+    description: "Sender 16-character Google App Password or SMTP key."
+    required: false
+
 output:
   format: markdown
+
 security:
   networkEgress: allowlist
   egressAllowlist:
@@ -50,22 +66,4 @@ security:
     - googleapis.com
     - api.groq.com
     - api.resend.com
-    - api.brevo.com
     - smtp.gmail.com
-    - imap.gmail.com
-secrets:
-  - name: GOOGLE_API_KEY
-    description: "Google Gemini API Key for LLM reasoning and RAG vector search embeddings."
-    required: true
-  - name: GROQ_API_KEY
-    description: "Groq API Key (Optional, used if Groq model selected)."
-    required: false
-  - name: RESEND_API_KEY
-    description: "Resend API Key (starts with re_) for Cloud / Render port-443 email dispatch."
-    required: false
-  - name: MY_EMAIL
-    description: "Sender Email Address for outreach and automated responses."
-    required: false
-  - name: EMAIL_PASSWORD
-    description: "Sender 16-character Google App Password or Resend API key."
-    required: false

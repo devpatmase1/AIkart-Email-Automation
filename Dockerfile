@@ -15,12 +15,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY . .
 
-# Expose port 9000
-EXPOSE 9000
-
 # Environment variables
-ENV PORT=9000
 ENV PYTHONUNBUFFERED=1
 
-# Command to run application
-CMD ["python", "deploy_api.py"]
+# Default command for aiKart container execution
+CMD ["python", "aikart_runner.py"]
