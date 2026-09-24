@@ -43,12 +43,6 @@ secrets:
   - name: GOOGLE_API_KEY
     description: "Google Gemini API Key for LLM reasoning and RAG vector search embeddings."
     required: true
-  - name: GROQ_API_KEY
-    description: "Groq API Key (Optional, used if Groq/Llama model is selected)."
-    required: false
-  - name: RESEND_API_KEY
-    description: "Resend API Key (starts with re_) for Cloud email dispatch."
-    required: false
   - name: MY_EMAIL
     description: "Sender Email Address for email responses."
     required: false
